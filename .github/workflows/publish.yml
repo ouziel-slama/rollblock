@@ -1,0 +1,71 @@
+name: Publish crate
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    environment: default
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: publish-${{ runner.os }}-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: publish-${{ runner.os }}-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: publish-${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all targets, all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-features --verbose
+
+      - name: Ensure tag matches crate version
+        run: |
+          python - <<'PY'
+          import pathlib, tomllib, os, sys
+          manifest = pathlib.Path("Cargo.toml")
+          data = tomllib.loads(manifest.read_text())
+          version = data["package"]["version"]
+          tag = os.environ.get("GITHUB_REF_NAME", "")
+          if tag.startswith("v"):
+              tag = tag[1:]
+          if version != tag:
+              sys.stderr.write(
+                  f"Tag version ({tag}) does not match Cargo.toml version ({version}).\\n"
+              )
+              sys.exit(1)
+          PY
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
+

@@ -1,0 +1,473 @@
+use std::fs::{File, OpenOptions};
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
+
+use parking_lot::Mutex;
+
+use crate::error::{MhinStoreError, StoreResult};
+use crate::storage::fs::sync_directory;
+use crate::types::{BlockId, BlockUndo, JournalMeta, Operation};
+
+use super::format::{
+    checksum_to_u32, read_journal_block, total_entry_count, JournalHeader,
+    JOURNAL_FLAG_UNCOMPRESSED, JOURNAL_HEADER_FLAG_NONE,
+};
+use super::{BlockJournal, JournalBlock, JournalIter, JournalOptions};
+
+pub struct FileBlockJournal {
+    root_dir: PathBuf,
+    journal_path: PathBuf,
+    index_path: PathBuf,
+    write_lock: Mutex<()>,
+    options: JournalOptions,
+    read_only: bool,
+}
+
+impl FileBlockJournal {
+    const JOURNAL_FILE_NAME: &'static str = "journal.bin";
+    const INDEX_FILE_NAME: &'static str = "journal.idx";
+
+    pub fn new(root_dir: impl AsRef<Path>) -> StoreResult<Self> {
+        Self::with_options(root_dir, JournalOptions::default())
+    }
+
+    pub fn with_options(root_dir: impl AsRef<Path>, options: JournalOptions) -> StoreResult<Self> {
+        let root_dir = root_dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&root_dir)?;
+        let journal_path = root_dir.join(Self::JOURNAL_FILE_NAME);
+        if !journal_path.exists() {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&journal_path)?;
+        }
+        let index_path = root_dir.join(Self::INDEX_FILE_NAME);
+        Ok(Self {
+            root_dir,
+            journal_path,
+            index_path,
+            write_lock: Mutex::new(()),
+            options,
+            read_only: false,
+        })
+    }
+
+    pub fn open_read_only(root_dir: impl AsRef<Path>) -> StoreResult<Self> {
+        let root_dir = root_dir.as_ref().to_path_buf();
+        if !root_dir.exists() {
+            return Err(MhinStoreError::MissingMetadata("journal directory"));
+        }
+        let journal_path = root_dir.join(Self::JOURNAL_FILE_NAME);
+        if !journal_path.exists() {
+            return Err(MhinStoreError::MissingMetadata("journal.bin"));
+        }
+        let index_path = root_dir.join(Self::INDEX_FILE_NAME);
+
+        Ok(Self {
+            root_dir,
+            journal_path,
+            index_path,
+            write_lock: Mutex::new(()),
+            options: JournalOptions::default(),
+            read_only: true,
+        })
+    }
+
+    fn ensure_writable(&self, operation: &'static str) -> StoreResult<()> {
+        if self.read_only {
+            Err(MhinStoreError::ReadOnlyOperation { operation })
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn root_dir(&self) -> &Path {
+        &self.root_dir
+    }
+
+    fn open_journal_for_write(&self) -> StoreResult<(File, bool)> {
+        self.ensure_writable("open_journal_for_write")?;
+        let existed = self.journal_path.exists();
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&self.journal_path)?;
+        Ok((file, !existed))
+    }
+
+    fn open_index_for_append(&self) -> StoreResult<(File, bool)> {
+        self.ensure_writable("open_index_for_append")?;
+        let existed = self.index_path.exists();
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.index_path)?;
+        Ok((file, !existed))
+    }
+
+    fn load_index(&self) -> StoreResult<Vec<JournalMeta>> {
+        if !self.index_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut file = File::open(&self.index_path)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+
+        let mut cursor = Cursor::new(data);
+        let mut metas = Vec::new();
+
+        while (cursor.position() as usize) < cursor.get_ref().len() {
+            let start = cursor.position();
+            match bincode::deserialize_from(&mut cursor) {
+                Ok(meta) => metas.push(meta),
+                Err(err) => {
+                    // Tolerate a trailing partial entry caused by a crash mid-write.
+                    if matches!(
+                        *err,
+                        bincode::ErrorKind::Io(ref io_err)
+                            if io_err.kind() == std::io::ErrorKind::UnexpectedEof
+                    ) {
+                        tracing::warn!(
+                            offset = start,
+                            "Detected truncated journal index entry; ignoring trailing bytes"
+                        );
+                        break;
+                    }
+                    return Err(err.into());
+                }
+            }
+        }
+
+        Ok(metas)
+    }
+}
+
+impl BlockJournal for FileBlockJournal {
+    fn append(
+        &self,
+        block: BlockId,
+        undo: &BlockUndo,
+        operations: &[Operation],
+    ) -> StoreResult<JournalMeta> {
+        self.ensure_writable("append")?;
+        if undo.block_height != block {
+            return Err(MhinStoreError::JournalBlockIdMismatch {
+                expected: block,
+                found: undo.block_height,
+            });
+        }
+
+        let _guard = self.write_lock.lock();
+
+        let (mut journal, journal_created) = self.open_journal_for_write()?;
+        let offset = journal.metadata()?.len();
+
+        let entry = JournalBlock {
+            block_height: block,
+            operations: operations.to_vec(),
+            undo: undo.clone(),
+        };
+
+        let serialized = bincode::serialize(&entry)?;
+        let (payload, flags) = if self.options.compress {
+            (
+                zstd::stream::encode_all(serialized.as_slice(), self.options.compression_level)?,
+                JOURNAL_HEADER_FLAG_NONE,
+            )
+        } else {
+            (serialized.clone(), JOURNAL_FLAG_UNCOMPRESSED)
+        };
+
+        let checksum_hash = blake3::hash(&payload);
+        let checksum = checksum_to_u32(checksum_hash);
+
+        let entry_count: u32 = total_entry_count(&entry.undo.shard_undos)
+            .try_into()
+            .map_err(|_| MhinStoreError::InvalidJournalHeader {
+                reason: "entry count overflow",
+            })?;
+
+        let header = JournalHeader::new(
+            block,
+            entry_count,
+            payload.len() as u64,
+            serialized.len() as u64,
+            checksum,
+            flags,
+        );
+
+        journal.write_all(&header.to_bytes())?;
+        journal.write_all(&payload)?;
+        journal.sync_data()?;
+        if journal_created {
+            if let Some(parent) = self.journal_path.parent() {
+                sync_directory(parent)?;
+            }
+        }
+
+        let meta = JournalMeta {
+            block_height: block,
+            offset,
+            compressed_len: payload.len() as u64,
+            checksum,
+        };
+
+        let (mut index, index_created) = self.open_index_for_append()?;
+        let index_bytes = bincode::serialize(&meta)?;
+        index.write_all(&index_bytes)?;
+        index.sync_data()?;
+        if index_created {
+            if let Some(parent) = self.index_path.parent() {
+                sync_directory(parent)?;
+            }
+        }
+
+        Ok(meta)
+    }
+
+    fn iter_backwards(&self, from: BlockId, to: BlockId) -> StoreResult<JournalIter> {
+        if from < to {
+            return Err(MhinStoreError::InvalidBlockRange {
+                start: from,
+                end: to,
+            });
+        }
+
+        let metas = self.load_index()?;
+
+        let filtered: Vec<JournalMeta> = metas
+            .into_iter()
+            .rev()
+            .filter(|meta| meta.block_height <= from && meta.block_height >= to)
+            .collect();
+
+        let file = OpenOptions::new().read(true).open(&self.journal_path)?;
+
+        Ok(JournalIter::new(file, filtered))
+    }
+    fn read_entry(&self, meta: &JournalMeta) -> StoreResult<JournalBlock> {
+        let mut file = OpenOptions::new().read(true).open(&self.journal_path)?;
+        read_journal_block(&mut file, meta)
+    }
+
+    fn list_entries(&self) -> StoreResult<Vec<JournalMeta>> {
+        self.load_index()
+    }
+
+    fn truncate_after(&self, block: BlockId) -> StoreResult<()> {
+        self.ensure_writable("truncate_after")?;
+        let _guard = self.write_lock.lock();
+
+        if !self.journal_path.exists() {
+            return Ok(());
+        }
+
+        let metas = self.load_index()?;
+        super::maintenance::truncate_after(&self.journal_path, &self.index_path, block, metas)
+    }
+
+    fn rewrite_index(&self, metas: &[JournalMeta]) -> StoreResult<()> {
+        self.ensure_writable("rewrite_index")?;
+        let _guard = self.write_lock.lock();
+        super::maintenance::rewrite_index(&self.index_path, metas)
+    }
+
+    fn scan_entries(&self) -> StoreResult<Vec<JournalMeta>> {
+        super::maintenance::scan_entries(&self.journal_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::journal::format::JOURNAL_HEADER_SIZE;
+    use crate::types::{Operation, ShardUndo, UndoEntry, UndoOp, Value};
+    use std::fs::OpenOptions;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use tempfile::tempdir_in;
+
+    fn sample_shard(shard_index: usize, key: [u8; 8], value: Value) -> ShardUndo {
+        ShardUndo {
+            shard_index,
+            entries: vec![UndoEntry {
+                key,
+                previous: Some(value),
+                op: UndoOp::Updated,
+            }],
+        }
+    }
+
+    fn sample_operations(block: BlockId) -> Vec<Operation> {
+        vec![Operation {
+            key: [block as u8; 8],
+            value: block,
+        }]
+    }
+
+    fn sample_undo(block: BlockId) -> BlockUndo {
+        BlockUndo {
+            block_height: block,
+            shard_undos: vec![sample_shard(0, [1u8; 8], 42)],
+        }
+    }
+
+    #[test]
+    fn append_and_read_single_block() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let journal = FileBlockJournal::new(tmp.path()).unwrap();
+
+        let block_height = 7;
+        let undo = sample_undo(block_height);
+        let operations = sample_operations(block_height);
+
+        let meta = journal.append(block_height, &undo, &operations).unwrap();
+        assert_eq!(meta.block_height, block_height);
+
+        let mut iter = journal.iter_backwards(block_height, block_height).unwrap();
+        let read_entry = iter.next_entry().unwrap().unwrap();
+        assert_eq!(read_entry.block_height, block_height);
+        assert_eq!(read_entry.undo.shard_undos.len(), 1);
+        assert_eq!(read_entry.operations.len(), 1);
+        assert_eq!(read_entry.operations[0].value, block_height);
+        assert!(iter.next_entry().is_none());
+    }
+
+    #[test]
+    fn append_empty_block_round_trip() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let journal = FileBlockJournal::new(tmp.path()).unwrap();
+
+        let block_height = 5;
+        let undo = BlockUndo {
+            block_height,
+            shard_undos: Vec::new(),
+        };
+
+        let meta = journal.append(block_height, &undo, &[]).unwrap();
+        assert_eq!(meta.block_height, block_height);
+
+        let mut iter = journal.iter_backwards(block_height, block_height).unwrap();
+        let entry = iter.next_entry().unwrap().unwrap();
+        assert_eq!(entry.block_height, block_height);
+        assert!(entry.operations.is_empty());
+        assert!(entry.undo.shard_undos.is_empty());
+        assert!(iter.next_entry().is_none());
+    }
+
+    #[test]
+    fn iterate_multiple_blocks_descending() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let journal = FileBlockJournal::new(tmp.path()).unwrap();
+
+        for block_height in 1..=3 {
+            let undo = sample_undo(block_height as BlockId);
+            let operations = sample_operations(block_height as BlockId);
+            journal
+                .append(block_height as BlockId, &undo, &operations)
+                .unwrap();
+        }
+
+        let mut iter = journal.iter_backwards(3, 1).unwrap();
+
+        for expected in (1..=3).rev() {
+            let entry = iter.next_entry().unwrap().unwrap();
+            assert_eq!(entry.block_height, expected);
+            assert_eq!(entry.undo.block_height, expected);
+            assert_eq!(entry.operations.len(), 1);
+        }
+
+        assert!(iter.next_entry().is_none());
+    }
+
+    #[test]
+    fn append_rejects_mismatched_block_height() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let journal = FileBlockJournal::new(tmp.path()).unwrap();
+
+        let undo = sample_undo(2);
+        let err = journal.append(1, &undo, &[]).unwrap_err();
+        match err {
+            MhinStoreError::JournalBlockIdMismatch { expected, found } => {
+                assert_eq!(expected, 1);
+                assert_eq!(found, 2);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iter_backwards_rejects_invalid_range() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let journal = FileBlockJournal::new(tmp.path()).unwrap();
+
+        match journal.iter_backwards(1, 2) {
+            Err(MhinStoreError::InvalidBlockRange { start, end }) => {
+                assert_eq!(start, 1);
+                assert_eq!(end, 2);
+            }
+            Ok(_) => panic!("expected invalid block range error"),
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iter_backwards_empty_journal_is_noop() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let journal = FileBlockJournal::new(tmp.path()).unwrap();
+        std::fs::File::create(journal.root_dir().join("journal.bin")).unwrap();
+
+        let mut iter = journal.iter_backwards(0, 0).unwrap();
+        assert!(iter.next_entry().is_none());
+    }
+
+    #[test]
+    fn corrupted_payload_results_in_checksum_error() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let journal = FileBlockJournal::new(tmp.path()).unwrap();
+
+        let block_height = 5;
+        let undo = sample_undo(block_height);
+        let operations = sample_operations(block_height);
+        let meta = journal.append(block_height, &undo, &operations).unwrap();
+
+        let journal_path = journal.root_dir().join("journal.bin");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(journal_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(meta.offset + JOURNAL_HEADER_SIZE as u64))
+            .unwrap();
+
+        let mut byte = [0u8];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(meta.offset + JOURNAL_HEADER_SIZE as u64))
+            .unwrap();
+        file.write_all(&byte).unwrap();
+        file.flush().unwrap();
+
+        let mut iter = journal.iter_backwards(block_height, block_height).unwrap();
+        let err = iter.next_entry().unwrap().unwrap_err();
+        match err {
+            MhinStoreError::JournalChecksumMismatch { block } => assert_eq!(block, block_height),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
