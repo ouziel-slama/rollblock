@@ -2,7 +2,14 @@
 
 ## Installation
 
-Add the published crate to your `Cargo.toml`:
+Rollblock is published at [crates.io/crates/rollblock](https://crates.io/crates/rollblock) with API docs on [docs.rs/rollblock](https://docs.rs/rollblock).
+
+Add it via `cargo`:
+```shell
+cargo add rollblock
+```
+
+Or edit `Cargo.toml` manually:
 ```toml
 [dependencies]
 rollblock = "0.1"

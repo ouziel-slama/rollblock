@@ -1,5 +1,7 @@
 # Rollblock
 
+[![Crates.io](https://img.shields.io/crates/v/rollblock.svg)](https://crates.io/crates/rollblock)
+[![Docs.rs](https://docs.rs/rollblock/badge.svg)](https://docs.rs/rollblock)
 [![Tests](https://github.com/ouziel-slama/rollblock/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/ouziel-slama/rollblock/actions/workflows/test.yml)
 [![Coverage](https://codecov.io/gh/ouziel-slama/rollblock/branch/main/graph/badge.svg)](https://codecov.io/gh/ouziel-slama/rollblock)
 [![Clippy](https://github.com/ouziel-slama/rollblock/actions/workflows/clippy.yml/badge.svg?branch=main)](https://github.com/ouziel-slama/rollblock/actions/workflows/clippy.yml)
@@ -38,12 +40,11 @@ See `docs/block_benchmark.md` for the complete methodology, hardware specs, and 
 
 ## Installation
 
-Until the crate is published on crates.io, depend on it through a local path or git reference:
+Pull it directly from crates.io (or add via `cargo add rollblock`):
 
 ```toml
 [dependencies]
-rollblock = { path = "../rollblock" }
-# rollblock = { git = "https://github.com/ouziel-slama/rollblock.git", tag = "v0.1.0" }
+rollblock = "0.1"
 ```
 
 ## Quick Start
