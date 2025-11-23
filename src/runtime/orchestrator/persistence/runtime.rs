@@ -57,6 +57,7 @@ where
     max_snapshot_interval: Duration,
     worker: Mutex<Option<JoinHandle<()>>>,
     snapshot_worker: Mutex<Option<JoinHandle<()>>>,
+    snapshot_scheduler: Mutex<Option<JoinHandle<()>>>,
     snapshot_tx: Mutex<Option<mpsc::Sender<SnapshotCommand>>>,
     snapshot_inflight: AtomicBool,
     last_snapshot: Mutex<Instant>,
@@ -108,6 +109,7 @@ where
             max_snapshot_interval,
             worker: Mutex::new(None),
             snapshot_worker: Mutex::new(None),
+            snapshot_scheduler: Mutex::new(None),
             snapshot_tx: Mutex::new(Some(snapshot_tx)),
             snapshot_inflight: AtomicBool::new(false),
             last_snapshot: Mutex::new(Instant::now()),
@@ -132,6 +134,15 @@ where
             .expect("failed to spawn snapshot worker");
 
         *runtime.snapshot_worker.lock() = Some(snapshot_handle);
+
+        if !snapshot_interval.is_zero() {
+            let scheduler_runtime = Arc::clone(&runtime);
+            let scheduler_handle = std::thread::Builder::new()
+                .name("rollblock-snapshot-scheduler".to_string())
+                .spawn(move || scheduler_runtime.run_snapshot_scheduler())
+                .expect("failed to spawn snapshot scheduler");
+            *runtime.snapshot_scheduler.lock() = Some(scheduler_handle);
+        }
 
         runtime
     }
@@ -266,6 +277,10 @@ where
 
     fn maybe_request_snapshot(&self) {
         if self.snapshot_interval.is_zero() {
+            return;
+        }
+
+        if self.stop.load(Ordering::Acquire) {
             return;
         }
 
@@ -581,6 +596,23 @@ where
         result
     }
 
+    fn run_snapshot_scheduler(self: Arc<Self>) {
+        let poll_interval = self.snapshot_scheduler_poll_interval();
+        while !self.stop.load(Ordering::Acquire) {
+            self.maybe_request_snapshot();
+            std::thread::sleep(poll_interval);
+        }
+    }
+
+    fn snapshot_scheduler_poll_interval(&self) -> Duration {
+        if self.snapshot_interval.is_zero() {
+            return Duration::from_millis(100);
+        }
+        let minimum = Duration::from_millis(10);
+        let maximum = Duration::from_secs(1);
+        self.snapshot_interval.min(maximum).max(minimum)
+    }
+
     pub fn shutdown(&self) {
         self.queue.stop();
         self.stop.store(true, Ordering::Release);
@@ -590,6 +622,9 @@ where
             let _ = handle.join();
         }
         if let Some(handle) = self.snapshot_worker.lock().take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.snapshot_scheduler.lock().take() {
             let _ = handle.join();
         }
     }
