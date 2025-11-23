@@ -15,7 +15,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1000,                   // initial capacity per shard
         1,                      // single thread (sequential mode)
         false,                  // disable compression for demo
-    );
+    )
+    .without_remote_server();
 
     println!("📦 Creating store with configuration:");
     println!("   - Data dir: ./data/basic_example");

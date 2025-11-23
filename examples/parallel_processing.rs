@@ -19,7 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         100_000, // 100k initial capacity per shard
         8,       // 8 threads for parallel processing
         false,   // disable compression to maximize throughput
-    );
+    )
+    .without_remote_server();
 
     println!("📦 Configuration:");
     println!("   - Shards: 16 (for parallel distribution)");

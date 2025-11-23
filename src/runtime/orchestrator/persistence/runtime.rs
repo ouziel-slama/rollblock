@@ -28,6 +28,11 @@ enum SnapshotCommand {
     Shutdown,
 }
 
+enum SnapshotLockMode {
+    Blocking,
+    NonBlocking,
+}
+
 /// Background worker that persists blocks and manages durability bookkeeping.
 pub struct PersistenceRuntime<E, J, S, M>
 where
@@ -49,11 +54,13 @@ where
     rollback_barrier: Arc<AtomicU64>,
     update_mutex: Arc<Mutex<()>>,
     snapshot_interval: Duration,
+    max_snapshot_interval: Duration,
     worker: Mutex<Option<JoinHandle<()>>>,
     snapshot_worker: Mutex<Option<JoinHandle<()>>>,
     snapshot_tx: Mutex<Option<mpsc::Sender<SnapshotCommand>>>,
     snapshot_inflight: AtomicBool,
     last_snapshot: Mutex<Instant>,
+    force_snapshot_mutex: Mutex<()>,
     stop: AtomicBool,
     flush_mutex: Mutex<()>,
     flush_cv: Condvar,
@@ -80,6 +87,7 @@ where
         rollback_barrier: Arc<AtomicU64>,
         update_mutex: Arc<Mutex<()>>,
         snapshot_interval: Duration,
+        max_snapshot_interval: Duration,
     ) -> Arc<Self> {
         let (snapshot_tx, snapshot_rx) = mpsc::channel();
 
@@ -97,11 +105,13 @@ where
             rollback_barrier,
             update_mutex,
             snapshot_interval,
+            max_snapshot_interval,
             worker: Mutex::new(None),
             snapshot_worker: Mutex::new(None),
             snapshot_tx: Mutex::new(Some(snapshot_tx)),
             snapshot_inflight: AtomicBool::new(false),
             last_snapshot: Mutex::new(Instant::now()),
+            force_snapshot_mutex: Mutex::new(()),
             stop: AtomicBool::new(false),
             flush_mutex: Mutex::new(()),
             flush_cv: Condvar::new(),
@@ -168,7 +178,6 @@ where
                     rollback_barrier,
                     "Skipping persistence for block above rollback target"
                 );
-                self.pending_blocks.pop_front(task.block_height);
                 task.set_status(TaskStatus::Cancelled);
                 self.flush_cv.notify_all();
                 continue;
@@ -328,6 +337,21 @@ where
         self.metadata
             .record_block_commit(task.block_height, &journal_meta)?;
 
+        let rollback_barrier_after = self.rollback_barrier.load(Ordering::Acquire);
+        if task.block_height > rollback_barrier_after {
+            tracing::debug!(
+                block_height = task.block_height,
+                previous_barrier = rollback_barrier,
+                rollback_barrier = rollback_barrier_after,
+                "Rollback barrier moved during persistence; discarding committed block"
+            );
+            self.metadata
+                .remove_journal_offsets_after(rollback_barrier_after)?;
+            self.metadata.set_current_block(rollback_barrier_after)?;
+            self.journal.truncate_after(rollback_barrier_after)?;
+            return Ok(PersistOutcome::Skipped);
+        }
+
         Ok(PersistOutcome::Committed)
     }
 
@@ -418,7 +442,20 @@ where
     }
 
     fn try_create_snapshot(&self) -> StoreResult<bool> {
-        let Some(_guard) = self.update_mutex.try_lock() else {
+        self.create_snapshot_with_mode(SnapshotLockMode::NonBlocking)
+    }
+
+    fn create_snapshot_blocking(&self) -> StoreResult<bool> {
+        self.create_snapshot_with_mode(SnapshotLockMode::Blocking)
+    }
+
+    fn create_snapshot_with_mode(&self, mode: SnapshotLockMode) -> StoreResult<bool> {
+        let guard = match mode {
+            SnapshotLockMode::Blocking => Some(self.update_mutex.lock()),
+            SnapshotLockMode::NonBlocking => self.update_mutex.try_lock(),
+        };
+
+        let Some(_guard) = guard else {
             return Ok(false);
         };
 
@@ -446,9 +483,17 @@ where
                 return Err(err);
             }
 
-            if self.durable_block.load(Ordering::Acquire)
-                >= self.applied_block.load(Ordering::Acquire)
-            {
+            let durable = self.durable_block.load(Ordering::Acquire);
+            let applied = self.applied_block.load(Ordering::Acquire);
+            if durable >= applied {
+                return Ok(());
+            }
+
+            // Rollbacks may legitimately leave `applied_block` ahead of `durable_block`
+            // while there are no in-flight persistence tasks. In that case, there is
+            // nothing left to wait for, so allow flush to return once both the queue
+            // and pending undo stack are drained.
+            if self.queue.is_empty() && self.pending_blocks.is_empty() {
                 return Ok(());
             }
 
@@ -456,6 +501,84 @@ where
                 .flush_cv
                 .wait_for(&mut guard, Duration::from_millis(10));
         }
+    }
+
+    pub fn force_snapshot_if_overdue(&self) -> StoreResult<()> {
+        if self.max_snapshot_interval.is_zero() {
+            return Ok(());
+        }
+
+        if !self.is_snapshot_overdue() {
+            return Ok(());
+        }
+
+        let _guard = self.force_snapshot_mutex.lock();
+
+        if !self.is_snapshot_overdue() {
+            return Ok(());
+        }
+
+        self.wait_for_active_snapshot();
+
+        if !self.is_snapshot_overdue() {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            elapsed_secs = self.last_snapshot.lock().elapsed().as_secs(),
+            max_secs = self.max_snapshot_interval.as_secs(),
+            "Forcing snapshot because maximum snapshot interval was exceeded"
+        );
+
+        self.flush()?;
+
+        // It's possible that flush triggered a regular snapshot in the background.
+        self.wait_for_active_snapshot();
+
+        if !self.is_snapshot_overdue() {
+            return Ok(());
+        }
+
+        let snapshot_created = self.run_snapshot_blocking()?;
+
+        if snapshot_created {
+            *self.last_snapshot.lock() = Instant::now();
+        } else {
+            tracing::warn!("Forced snapshot request skipped because prerequisites were not met");
+        }
+
+        Ok(())
+    }
+
+    fn is_snapshot_overdue(&self) -> bool {
+        if self.max_snapshot_interval.is_zero() {
+            return false;
+        }
+        self.last_snapshot.lock().elapsed() >= self.max_snapshot_interval
+    }
+
+    fn wait_for_active_snapshot(&self) {
+        while self.snapshot_inflight.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn run_snapshot_blocking(&self) -> StoreResult<bool> {
+        loop {
+            match self.snapshot_inflight.compare_exchange(
+                false,
+                true,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+
+        let result = self.create_snapshot_blocking();
+        self.snapshot_inflight.store(false, Ordering::Release);
+        result
     }
 
     pub fn shutdown(&self) {

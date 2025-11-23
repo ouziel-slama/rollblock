@@ -165,6 +165,7 @@ fn async_snapshots_do_not_block_queue() {
 
     let mut persistence_settings = async_settings(4);
     persistence_settings.snapshot_interval = Duration::from_millis(5);
+    persistence_settings.max_snapshot_interval = Duration::from_millis(5);
 
     let orchestrator = DefaultBlockOrchestrator::new(
         engine,
@@ -223,6 +224,65 @@ fn async_snapshots_do_not_block_queue() {
         "durable height failed to advance while snapshot thread was running"
     );
 
+    orchestrator.shutdown().unwrap();
+}
+
+#[test]
+fn forces_snapshot_after_max_interval() {
+    let tmp = tempdir();
+    let journal_path = tmp.path().join("journal");
+
+    let metadata = Arc::new(MemoryMetadataStore::new());
+    let journal = Arc::new(FileBlockJournal::new(&journal_path).unwrap());
+    let snapshotter = Arc::new(SlowSnapshotter::new(Duration::from_millis(25)));
+    let snapshot_flag = snapshotter.in_progress_flag();
+
+    let shards: Vec<Arc<dyn StateShard>> = (0..2)
+        .map(|index| Arc::new(RawTableShard::new(index, 32)) as Arc<dyn StateShard>)
+        .collect();
+
+    let engine = Arc::new(ShardedStateEngine::new(shards, Arc::clone(&metadata)));
+
+    let mut persistence_settings = async_settings(4);
+    persistence_settings.snapshot_interval = Duration::from_secs(3600);
+    persistence_settings.max_snapshot_interval = Duration::from_millis(30);
+
+    let orchestrator = DefaultBlockOrchestrator::new(
+        engine,
+        journal,
+        Arc::clone(&snapshotter),
+        Arc::clone(&metadata),
+        persistence_settings,
+    )
+    .unwrap();
+
+    let key_a = [0xA1u8; 8];
+    orchestrator
+        .apply_operations(1, vec![operation(key_a, 1)])
+        .unwrap();
+    wait_for_block(&metadata, 1);
+
+    thread::sleep(Duration::from_millis(50));
+
+    let monitor_flag = Arc::clone(&snapshot_flag);
+    let monitor = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            if monitor_flag.load(Ordering::Acquire) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("forced snapshot never started");
+    });
+
+    let key_b = [0xB2u8; 8];
+    orchestrator
+        .apply_operations(2, vec![operation(key_b, 2)])
+        .unwrap();
+    wait_for_block(&metadata, 2);
+
+    monitor.join().unwrap();
     orchestrator.shutdown().unwrap();
 }
 

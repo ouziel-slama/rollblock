@@ -18,7 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1000,  // initial capacity
         1,     // single thread
         false, // disable compression for clarity
-    );
+    )
+    .without_remote_server();
 
     println!("📦 Creating store with manual reorg handling\n");
     let store = MhinStoreFacade::new(config)?;

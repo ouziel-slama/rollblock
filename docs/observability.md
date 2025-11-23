@@ -18,13 +18,18 @@ Get metrics from the store facade:
 ```rust
 use rollblock::{MhinStoreFacade, StoreConfig};
 
-let config = StoreConfig::new("./data", 4, 1000, 1, false);
+let config = StoreConfig::new("./data", 4, 1000, 1, false).enable_remote_server()?;
 let store = MhinStoreFacade::new(config)?;
 
 // Access metrics
 if let Some(metrics) = store.metrics() {
     let snapshot = metrics.snapshot();
     println!("Operations: {}", snapshot.operations_applied);
+}
+
+// Remote server metrics (only available when `enable_server` was set)
+if let Some(remote) = store.remote_server_metrics() {
+    println!("Active remote connections: {}", remote.active_connections);
 }
 ```
 
@@ -50,7 +55,8 @@ if let Some(metrics) = store.metrics() {
 - `rollback_p50_us`, `rollback_p95_us`, `rollback_p99_us` - Rollback latency percentiles
 
 #### State Metrics
-- `current_block_height` - Current block number
+- `current_block_height` *(a.k.a. `applied_block_height`)* - Highest block applied **in memory**. In asynchronous durability it can be ahead of the on-disk state.
+- `durable_block_height` - Highest block durably persisted to journal + metadata.
 - `total_keys_stored` - Number of keys in the store
 - `last_operation_secs` - Seconds since last operation
 
@@ -76,7 +82,8 @@ Output example:
   "rollbacks_executed": 2,
   "avg_apply_time_us": 15000,
   "apply_p95_us": 25000,
-  "current_block_height": 100,
+  "current_block_height": 120,
+  "durable_block_height": 100,
   "failed_operations": 0
 }
 ```

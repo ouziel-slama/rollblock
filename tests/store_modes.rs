@@ -1,12 +1,22 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Once;
 
 use rollblock::types::Operation;
-use rollblock::{MhinStoreError, MhinStoreFacade, StoreConfig, StoreFacade, StoreMode};
+use rollblock::{MhinStoreError, MhinStoreFacade, StoreConfig, StoreFacade};
 use tempfile::tempdir_in;
 
+static INIT_TESTDATA_ROOT: Once = Once::new();
+
 fn temp_store_dir(name: &str) -> PathBuf {
-    let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+    let workspace_tmp = std::env::current_dir()
+        .unwrap()
+        .join("target/testdata/store_modes");
+    INIT_TESTDATA_ROOT.call_once(|| {
+        if std::env::var_os("ROLLBLOCK_KEEP_TESTDATA").is_none() {
+            let _ = fs::remove_dir_all(&workspace_tmp);
+        }
+    });
     fs::create_dir_all(&workspace_tmp).unwrap();
     let tmp = tempdir_in(&workspace_tmp).unwrap();
     tmp.path().join(name)
@@ -15,7 +25,7 @@ fn temp_store_dir(name: &str) -> PathBuf {
 #[test]
 fn second_writer_fails_fast() {
     let data_dir = temp_store_dir("writer-lock");
-    let config = StoreConfig::new(&data_dir, 2, 16, 1, false);
+    let config = StoreConfig::new(&data_dir, 2, 16, 1, false).without_remote_server();
     let writer = MhinStoreFacade::new(config.clone()).expect("first writer");
 
     let err = match MhinStoreFacade::new(config.clone()) {
@@ -24,7 +34,7 @@ fn second_writer_fails_fast() {
     };
     match err {
         MhinStoreError::DataDirLocked { requested, .. } => {
-            assert_eq!(requested, "read-write");
+            assert_eq!(requested, "exclusive");
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -34,35 +44,32 @@ fn second_writer_fails_fast() {
 }
 
 #[test]
-fn multiple_readers_can_share_lock() {
-    let data_dir = temp_store_dir("shared-readers");
-    let writer_config = StoreConfig::new(&data_dir, 2, 16, 1, false);
-    let key = [0x42u8; 8];
+fn active_handle_blocks_second_open_even_for_reads() {
+    let data_dir = temp_store_dir("exclusive-lock");
+    let config = StoreConfig::new(&data_dir, 2, 16, 1, false).without_remote_server();
+    let key = [0xAAu8; 8];
 
-    {
-        let writer = MhinStoreFacade::new(writer_config.clone()).expect("writer init");
-        writer
-            .set(1, vec![Operation { key, value: 7 }])
-            .expect("write should succeed");
-        writer.close().expect("writer close");
-    }
+    let writer = MhinStoreFacade::new(config.clone()).expect("initial writer");
+    writer
+        .set(1, vec![Operation { key, value: 11 }])
+        .expect("write should succeed");
+    assert_eq!(writer.get(key).unwrap(), 11);
 
-    let reader_config = writer_config.clone().with_mode(StoreMode::ReadOnly);
-    let reader_one = MhinStoreFacade::new(reader_config.clone()).expect("first reader");
-    let reader_two = MhinStoreFacade::new(reader_config).expect("second reader");
-
-    assert_eq!(reader_one.get(key).unwrap(), 7);
-    assert_eq!(reader_two.get(key).unwrap(), 7);
-
-    let err = reader_one
-        .set(2, vec![Operation { key, value: 9 }])
-        .expect_err("read-only set should fail");
+    let err = match MhinStoreFacade::new(config.clone()) {
+        Ok(_) => panic!("second handle should fail"),
+        Err(err) => err,
+    };
     match err {
-        MhinStoreError::ReadOnlyOperation { operation } => {
-            assert_eq!(operation, "apply_operations");
+        MhinStoreError::DataDirLocked { requested, .. } => {
+            assert_eq!(requested, "exclusive");
         }
         other => panic!("unexpected error: {other:?}"),
     }
+
+    drop(writer);
+    let reopened = MhinStoreFacade::new(config).expect("reopen after drop");
+    assert_eq!(reopened.get(key).unwrap(), 11);
+    reopened.close().expect("reopened close");
 }
 
 #[test]
@@ -71,13 +78,15 @@ fn existing_config_recovers_lmdb_map_size() {
     let custom_map_size = 128usize << 20;
 
     {
-        let config =
-            StoreConfig::new(&data_dir, 2, 16, 1, false).with_lmdb_map_size(custom_map_size);
+        let config = StoreConfig::new(&data_dir, 2, 16, 1, false)
+            .with_lmdb_map_size(custom_map_size)
+            .without_remote_server();
         let store = MhinStoreFacade::new(config).expect("initial writer");
         store.close().expect("initial store close");
     }
 
-    let existing_config = StoreConfig::existing(&data_dir);
+    let existing_config = StoreConfig::existing_with_lmdb_map_size(&data_dir, custom_map_size)
+        .without_remote_server();
     assert_eq!(
         existing_config.lmdb_map_size, custom_map_size,
         "StoreConfig::existing should recover the configured LMDB map size"

@@ -5,7 +5,6 @@ use std::path::Path;
 use fs2::FileExt;
 
 use crate::error::{MhinStoreError, StoreResult};
-use crate::facade::StoreMode;
 
 const LOCK_FILE_NAME: &str = "rollblock.lock";
 
@@ -14,35 +13,30 @@ pub struct StoreLockGuard {
 }
 
 impl StoreLockGuard {
-    pub fn acquire(data_dir: &Path, mode: StoreMode) -> StoreResult<Self> {
-        // Ensure the base directory exists so we have a place for the lock file.
-        if mode.is_read_write() {
-            fs::create_dir_all(data_dir)?;
-        }
+    pub fn acquire(data_dir: &Path) -> StoreResult<Self> {
+        // Always ensure the base directory exists so that the lock file can live alongside
+        // the data folders (metadata, journal, snapshots).
+        fs::create_dir_all(data_dir)?;
 
         let lock_path = data_dir.join(LOCK_FILE_NAME);
         let file = match OpenOptions::new()
-            .create(mode.is_read_write())
+            .create(true)
             .read(true)
-            .write(mode.is_read_write())
+            .write(true)
+            .truncate(false)
             .open(&lock_path)
         {
             Ok(file) => file,
-            Err(err) if !mode.is_read_write() && err.kind() == ErrorKind::NotFound => {
-                return Err(MhinStoreError::MissingMetadata("lock file"));
+            Err(err) => {
+                if err.kind() == ErrorKind::NotFound {
+                    return Err(MhinStoreError::MissingMetadata("lock file"));
+                }
+                return Err(err.into());
             }
-            Err(err) => return Err(err.into()),
         };
 
-        let requested = match mode {
-            StoreMode::ReadWrite => "read-write",
-            StoreMode::ReadOnly => "read-only",
-        };
-
-        let lock_result = match mode {
-            StoreMode::ReadWrite => FileExt::try_lock_exclusive(&file),
-            StoreMode::ReadOnly => FileExt::try_lock_shared(&file),
-        };
+        let requested = "exclusive";
+        let lock_result = FileExt::try_lock_exclusive(&file);
 
         if lock_result.is_err() {
             return Err(MhinStoreError::DataDirLocked {

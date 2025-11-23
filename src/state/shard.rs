@@ -8,6 +8,18 @@ pub trait StateShard: Send + Sync {
     fn apply(&self, ops: &[ShardOp]) -> ShardUndo;
     fn revert(&self, undo: &ShardUndo);
     fn get(&self, key: &Key) -> Option<Value>;
+    /// Fetches multiple keys while allowing implementations to amortize locking.
+    fn get_many(&self, keys: &[Key], out: &mut [Option<Value>]) {
+        debug_assert_eq!(
+            keys.len(),
+            out.len(),
+            "get_many requires matching keys/out lengths"
+        );
+
+        for (key, slot) in keys.iter().zip(out.iter_mut()) {
+            *slot = self.get(key);
+        }
+    }
     fn stats(&self) -> ShardStats;
 
     /// Export all key-value pairs from this shard

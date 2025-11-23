@@ -44,6 +44,7 @@ impl Default for DurabilityMode {
 pub struct PersistenceSettings {
     pub durability_mode: DurabilityMode,
     pub snapshot_interval: Duration,
+    pub max_snapshot_interval: Duration,
 }
 
 impl Default for PersistenceSettings {
@@ -51,6 +52,7 @@ impl Default for PersistenceSettings {
         Self {
             durability_mode: DurabilityMode::default(),
             snapshot_interval: Duration::from_secs(3600),
+            max_snapshot_interval: Duration::from_secs(3600),
         }
     }
 }

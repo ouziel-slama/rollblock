@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::net::ServerError;
 use crate::types::BlockId;
 
 pub type StoreResult<T> = Result<T, MhinStoreError>;
@@ -80,9 +81,6 @@ pub enum MhinStoreError {
         adjusted: BlockId,
     },
 
-    #[error("read-only operation not allowed: {operation}")]
-    ReadOnlyOperation { operation: &'static str },
-
     #[error("{lock} lock poisoned")]
     LockPoisoned { lock: &'static str },
 
@@ -99,6 +97,9 @@ pub enum MhinStoreError {
     #[error("missing shard layout in metadata at {path:?}")]
     MissingShardLayout { path: PathBuf },
 
+    #[error("remote server configuration missing; call `with_remote_server` before enabling")]
+    RemoteServerConfigMissing,
+
     #[error("data directory locked at {path:?} (requested: {requested})")]
     DataDirLocked {
         path: PathBuf,
@@ -107,4 +108,10 @@ pub enum MhinStoreError {
 
     #[error("durability failure for block {block}: {reason}")]
     DurabilityFailure { block: BlockId, reason: String },
+
+    #[error("remote server error: {0}")]
+    RemoteServer(#[from] ServerError),
+
+    #[error("remote server task failed: {reason}")]
+    RemoteServerTaskFailure { reason: String },
 }

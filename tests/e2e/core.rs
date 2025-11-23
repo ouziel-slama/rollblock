@@ -1,7 +1,9 @@
 use rollblock::types::Operation;
 use rollblock::{StoreFacade, StoreResult};
 
-use super::e2e_support::{apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT};
+use super::e2e_support::{
+    apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT,
+};
 
 #[test]
 fn e2e_basic_lifecycle() -> StoreResult<()> {
@@ -15,7 +17,7 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
     let key = [1u8; 8];
 
     let current = store.current_block()?;
-    let applied = store.applied_block();
+    let applied = store.applied_block()?;
     let durable = store.durable_block()?;
     assert_eq!(current, 0);
     assert_eq!(applied, 0);
@@ -25,7 +27,7 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
     wait_for_durable(&store, 1, DEFAULT_TIMEOUT)?;
 
     let current = store.current_block()?;
-    let applied = store.applied_block();
+    let applied = store.applied_block()?;
     let durable = store.durable_block()?;
     let value = store.get(key)?;
     assert_eq!(current, 1);
@@ -37,7 +39,7 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
     wait_for_durable(&store, 2, DEFAULT_TIMEOUT)?;
 
     let current = store.current_block()?;
-    let applied = store.applied_block();
+    let applied = store.applied_block()?;
     let durable = store.durable_block()?;
     let value = store.get(key)?;
     assert_eq!(current, 2);
@@ -49,7 +51,7 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
     wait_for_durable(&store, 3, DEFAULT_TIMEOUT)?;
 
     let current = store.current_block()?;
-    let applied = store.applied_block();
+    let applied = store.applied_block()?;
     let durable = store.durable_block()?;
     let value = store.get(key)?;
     assert_eq!(current, 3);
@@ -59,7 +61,7 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
 
     store.rollback(1)?;
     let current = store.current_block()?;
-    let applied = store.applied_block();
+    let applied = store.applied_block()?;
     let value = store.get(key)?;
     assert_eq!(current, 1);
     assert_eq!(applied, 1);
@@ -87,7 +89,7 @@ fn e2e_zero_value_auto_delete() -> StoreResult<()> {
     wait_for_durable(&store, 2, DEFAULT_TIMEOUT)?;
 
     let current = store.current_block()?;
-    let applied = store.applied_block();
+    let applied = store.applied_block()?;
     let value = store.get(key)?;
     assert_eq!(current, 2);
     assert_eq!(applied, 2);

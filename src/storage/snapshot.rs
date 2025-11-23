@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::StoreResult;
 use crate::state_shard::StateShard;
 use crate::types::BlockId;
 
@@ -31,14 +31,6 @@ impl MmapSnapshotter {
     pub fn new(root_dir: impl AsRef<Path>) -> StoreResult<Self> {
         let root_dir = root_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&root_dir)?;
-        Ok(Self { root_dir })
-    }
-
-    pub fn open_read_only(root_dir: impl AsRef<Path>) -> StoreResult<Self> {
-        let root_dir = root_dir.as_ref().to_path_buf();
-        if !root_dir.exists() {
-            return Err(MhinStoreError::MissingMetadata("snapshot directory"));
-        }
         Ok(Self { root_dir })
     }
 

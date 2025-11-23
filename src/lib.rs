@@ -52,8 +52,14 @@
 //! store.close()?;
 //! # Ok::<(), rollblock::error::MhinStoreError>(())
 //! ```
+//! Networking is opt-in: call `.enable_remote_server()` (or
+//! `.with_remote_server(...)`) to start the embedded server, which binds to
+//! `127.0.0.1:9443` with Basic Auth credentials `proto`/`proto` unless you
+//! override `RemoteServerSettings`.
 
 pub mod api;
+pub mod client;
+pub mod net;
 pub mod runtime;
 pub mod state;
 pub mod storage;
@@ -67,12 +73,19 @@ pub use crate::storage::metadata;
 pub use crate::storage::snapshot;
 
 pub use api::error::{MhinStoreError, StoreResult};
-pub use api::facade::{MhinStoreBlockFacade, MhinStoreFacade, StoreConfig, StoreFacade, StoreMode};
+pub use api::facade::{
+    MhinStoreBlockFacade, MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade,
+};
 pub use api::types::*;
+pub use client::{ClientError, RemoteStoreClient};
+pub use net::server::{
+    RemoteServerConfig, RemoteServerHandle, RemoteServerSecurity, RemoteStoreServer, ServerError,
+    ServerMetricsSnapshot,
+};
+pub use net::BasicAuthConfig;
 pub use runtime::metrics::{HealthState, HealthStatus, MetricsSnapshot, StoreMetrics};
 pub use runtime::orchestrator::{
     BlockOrchestrator, DefaultBlockOrchestrator, DurabilityMode, PersistenceSettings,
-    ReadOnlyBlockOrchestrator,
 };
 pub use state::engine::{ShardedStateEngine, StateEngine};
 pub use state::shard::{RawTableShard, StateShard};

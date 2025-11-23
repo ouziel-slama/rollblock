@@ -11,8 +11,10 @@ use tempfile::{Builder, TempDir};
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+pub const HARNESS_LMDB_MAP_SIZE: usize = 32 << 20; // 32 MiB keeps LMDB files tiny for tests.
 
 static INIT_TRACING: Once = Once::new();
+static INIT_TESTDATA_ROOT: Once = Once::new();
 
 pub fn init_tracing() {
     INIT_TRACING.call_once(|| {
@@ -23,7 +25,14 @@ pub fn init_tracing() {
 }
 
 fn testdata_root() -> PathBuf {
-    let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+    let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata/e2e");
+
+    INIT_TESTDATA_ROOT.call_once(|| {
+        if std::env::var_os("ROLLBLOCK_KEEP_TESTDATA").is_none() {
+            let _ = fs::remove_dir_all(&workspace_tmp);
+        }
+    });
+
     fs::create_dir_all(&workspace_tmp).unwrap();
     workspace_tmp
 }
@@ -53,13 +62,15 @@ impl StoreHarness {
     }
 
     pub fn reopen(&self) -> StoreResult<MhinStoreFacade> {
-        let mut config = StoreConfig::existing(&self.data_dir);
+        let mut config =
+            StoreConfig::existing_with_lmdb_map_size(&self.data_dir, HARNESS_LMDB_MAP_SIZE)
+                .without_remote_server();
         config.thread_count = self.config.thread_count;
         config.durability_mode = self.config.durability_mode.clone();
         config.snapshot_interval = self.config.snapshot_interval;
+        config.max_snapshot_interval = self.config.max_snapshot_interval;
         config.compress_journal = self.config.compress_journal;
         config.journal_compression_level = self.config.journal_compression_level;
-        config.mode = self.config.mode;
         MhinStoreFacade::new(config)
     }
 }
@@ -70,7 +81,9 @@ pub struct StoreHarnessBuilder {
     thread_count: usize,
     durability_mode: DurabilityMode,
     snapshot_interval: Duration,
+    max_snapshot_interval: Duration,
     compress_journal: bool,
+    journal_compression_level: i32,
 }
 
 impl StoreHarnessBuilder {
@@ -87,7 +100,9 @@ impl StoreHarnessBuilder {
             thread_count: 1,
             durability_mode: DurabilityMode::default(),
             snapshot_interval: Duration::from_secs(3600),
+            max_snapshot_interval: Duration::from_secs(3600),
             compress_journal: false,
+            journal_compression_level: 0,
         }
     }
 
@@ -108,6 +123,12 @@ impl StoreHarnessBuilder {
 
     pub fn snapshot_interval(mut self, interval: Duration) -> Self {
         self.snapshot_interval = interval;
+        self.max_snapshot_interval = interval;
+        self
+    }
+
+    pub fn max_snapshot_interval(mut self, interval: Duration) -> Self {
+        self.max_snapshot_interval = interval;
         self
     }
 
@@ -125,10 +146,14 @@ impl StoreHarnessBuilder {
             self.initial_capacity,
             self.thread_count,
             false,
-        );
+        )
+        .with_lmdb_map_size(HARNESS_LMDB_MAP_SIZE)
+        .without_remote_server();
         config.durability_mode = self.durability_mode.clone();
         config.snapshot_interval = self.snapshot_interval;
+        config.max_snapshot_interval = self.max_snapshot_interval;
         config.compress_journal = self.compress_journal;
+        config.journal_compression_level = self.journal_compression_level;
 
         StoreHarness {
             tempdir: self.tempdir,

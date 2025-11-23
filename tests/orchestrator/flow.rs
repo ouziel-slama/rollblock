@@ -1,11 +1,15 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Barrier,
+};
+use std::thread;
+use std::time::Duration;
 
 use rollblock::error::MhinStoreError;
-use rollblock::orchestrator::{
-    BlockOrchestrator, DefaultBlockOrchestrator, ReadOnlyBlockOrchestrator,
-};
+use rollblock::orchestrator::{BlockOrchestrator, DefaultBlockOrchestrator};
 use rollblock::state_engine::ShardedStateEngine;
 use rollblock::state_shard::{RawTableShard, StateShard};
+use rollblock::types::{Key, ShardOp, ShardStats, ShardUndo, Value};
 use rollblock::FileBlockJournal;
 use rollblock::MetadataStore;
 
@@ -13,36 +17,62 @@ use super::support::{
     operation, synchronous_settings, tempdir, MemoryMetadataStore, NoopSnapshotter,
 };
 
-#[test]
-fn read_only_orchestrator_reports_restored_height_when_metadata_lags() {
-    let metadata = Arc::new(MemoryMetadataStore::new());
-    metadata.set_current_block(0).unwrap();
+struct BlockingShard {
+    inner: RawTableShard,
+    apply_ready: Arc<Barrier>,
+    apply_release: Arc<Barrier>,
+    apply_calls: AtomicUsize,
+}
 
-    let shards: Vec<Arc<dyn StateShard>> =
-        vec![Arc::new(RawTableShard::new(0, 16)) as Arc<dyn StateShard>];
-    let engine = Arc::new(ShardedStateEngine::new(shards, Arc::clone(&metadata)));
+impl BlockingShard {
+    fn new(
+        shard_index: usize,
+        capacity: usize,
+        apply_ready: Arc<Barrier>,
+        apply_release: Arc<Barrier>,
+    ) -> Self {
+        Self {
+            inner: RawTableShard::new(shard_index, capacity),
+            apply_ready,
+            apply_release,
+            apply_calls: AtomicUsize::new(0),
+        }
+    }
+}
 
-    let restored_block = 42;
-    let orchestrator =
-        ReadOnlyBlockOrchestrator::new(engine, Arc::clone(&metadata), restored_block)
-            .expect("read-only orchestrator should initialize");
+impl StateShard for BlockingShard {
+    fn apply(&self, ops: &[ShardOp]) -> ShardUndo {
+        let call_index = self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        if call_index == 1 {
+            self.apply_ready.wait();
+            self.apply_release.wait();
+        }
+        self.inner.apply(ops)
+    }
 
-    assert_eq!(orchestrator.applied_block_height(), restored_block);
+    fn revert(&self, undo: &ShardUndo) {
+        self.inner.revert(undo);
+    }
 
-    let metrics_snapshot = orchestrator.metrics().unwrap().snapshot();
-    assert_eq!(metrics_snapshot.current_block_height, restored_block);
-    assert_eq!(metrics_snapshot.durable_block_height, restored_block);
+    fn get(&self, key: &Key) -> Option<Value> {
+        self.inner.get(key)
+    }
 
-    // Metadata still reports height 0, but the orchestrator must surface restored height.
-    assert_eq!(metadata.current_block().unwrap(), 0);
-    assert_eq!(orchestrator.current_block().unwrap(), restored_block);
+    fn stats(&self) -> ShardStats {
+        self.inner.stats()
+    }
 
-    // Once metadata catches up, the orchestrator should advance as well.
-    metadata
-        .set_current_block(restored_block + 1)
-        .expect("metadata update should succeed");
-    assert_eq!(orchestrator.current_block().unwrap(), restored_block + 1);
-    assert_eq!(orchestrator.applied_block_height(), restored_block + 1);
+    fn export_data(&self) -> Vec<(Key, Value)> {
+        self.inner.export_data()
+    }
+
+    fn visit_entries(&self, visitor: &mut dyn FnMut(Key, Value)) {
+        self.inner.visit_entries(visitor);
+    }
+
+    fn import_data(&self, data: Vec<(Key, Value)>) {
+        self.inner.import_data(data);
+    }
 }
 
 #[test]
@@ -88,6 +118,84 @@ fn apply_and_revert_flow() {
     assert_eq!(orchestrator.fetch(key_a).unwrap(), 0);
     assert_eq!(orchestrator.fetch(key_b).unwrap(), 0);
     assert_eq!(metadata.current_block().unwrap(), 0);
+}
+
+#[test]
+fn reader_gate_blocks_fetch_during_pending_apply() {
+    let tmp = tempdir();
+    let journal_path = tmp.path().join("journal");
+
+    let metadata = Arc::new(MemoryMetadataStore::new());
+    let journal = Arc::new(FileBlockJournal::new(&journal_path).unwrap());
+    let snapshotter = Arc::new(NoopSnapshotter);
+
+    let apply_ready = Arc::new(Barrier::new(2));
+    let apply_release = Arc::new(Barrier::new(2));
+
+    let shard: Arc<dyn StateShard> = Arc::new(BlockingShard::new(
+        0,
+        32,
+        Arc::clone(&apply_ready),
+        Arc::clone(&apply_release),
+    ));
+
+    let engine = Arc::new(ShardedStateEngine::new(vec![shard], Arc::clone(&metadata)));
+
+    let orchestrator = Arc::new(
+        DefaultBlockOrchestrator::new(
+            engine,
+            journal,
+            snapshotter,
+            Arc::clone(&metadata),
+            synchronous_settings(),
+        )
+        .unwrap(),
+    );
+
+    let key = [1u8; 8];
+    orchestrator
+        .apply_operations(1, vec![operation(key, 11)])
+        .unwrap();
+
+    let writer = {
+        let orchestrator = Arc::clone(&orchestrator);
+        thread::spawn(move || {
+            orchestrator
+                .apply_operations(2, vec![operation(key, 42)])
+                .unwrap();
+        })
+    };
+
+    apply_ready.wait();
+
+    let fetch_start = Arc::new(Barrier::new(2));
+    let fetch_finished = Arc::new(AtomicBool::new(false));
+    let fetch_handle = {
+        let orchestrator = Arc::clone(&orchestrator);
+        let fetch_start = Arc::clone(&fetch_start);
+        let fetch_finished = Arc::clone(&fetch_finished);
+        thread::spawn(move || {
+            fetch_start.wait();
+            let value = orchestrator.fetch(key).unwrap();
+            fetch_finished.store(true, Ordering::Release);
+            value
+        })
+    };
+
+    // Ensure the fetch thread is ready and waiting on the reader gate.
+    fetch_start.wait();
+
+    thread::sleep(Duration::from_millis(50));
+    assert!(
+        !fetch_finished.load(Ordering::Acquire),
+        "fetch should still be blocked while apply is pending"
+    );
+
+    apply_release.wait();
+
+    writer.join().unwrap();
+    let fetched = fetch_handle.join().unwrap();
+    assert_eq!(fetched, 42);
 }
 
 #[test]

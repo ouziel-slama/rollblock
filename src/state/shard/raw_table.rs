@@ -142,6 +142,17 @@ impl StateShard for RawTableShard {
             .map(|(_, value)| *value)
     }
 
+    fn get_many(&self, keys: &[Key], out: &mut [Option<Value>]) {
+        debug_assert_eq!(keys.len(), out.len());
+        let table = self.table.read();
+        for (key, slot) in keys.iter().zip(out.iter_mut()) {
+            let hash = self.hash_key(key);
+            *slot = table
+                .get(hash, |(candidate, _)| candidate == key)
+                .map(|(_, value)| *value);
+        }
+    }
+
     fn stats(&self) -> ShardStats {
         let table = self.table.read();
 

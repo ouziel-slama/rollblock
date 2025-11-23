@@ -6,8 +6,8 @@ use crate::error::{MhinStoreError, StoreResult};
 use crate::metadata::MetadataStore;
 use crate::snapshot::Snapshotter;
 use crate::state_engine::StateEngine;
-use crate::types::{BlockId, BlockUndo, Operation, Value};
-use parking_lot::{Mutex, MutexGuard};
+use crate::types::{BlockId, BlockUndo, Key, Operation, Value};
+use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 use super::durability::PersistenceSettings;
 use super::persistence::{ApplyMetricsContext, PersistenceContext, PersistenceTask};
@@ -26,6 +26,7 @@ where
     snapshotter: Shared<S>,
     metadata: Shared<M>,
     update_mutex: Shared<Mutex<()>>,
+    reader_gate: Shared<RwLock<()>>,
     persistence: PersistenceContext<E, J, S, M>,
     fatal_error: Mutex<Option<(BlockId, String)>>,
 }
@@ -45,6 +46,7 @@ where
         persistence_settings: PersistenceSettings,
     ) -> StoreResult<Self> {
         let update_mutex = Shared::new(Mutex::new(()));
+        let reader_gate = Shared::new(RwLock::new(()));
 
         let persistence = PersistenceContext::new(
             Arc::clone(&state_engine),
@@ -61,6 +63,7 @@ where
             snapshotter,
             metadata,
             update_mutex,
+            reader_gate,
             persistence,
             fatal_error: Mutex::new(None),
         })
@@ -94,6 +97,7 @@ where
         block_height: BlockId,
         metrics_context: ApplyMetricsContext,
         guard: MutexGuard<'_, ()>,
+        _reader_guard: RwLockWriteGuard<'_, ()>,
     ) -> StoreResult<()> {
         let mut mutation_guard = Some(guard);
         if self.persistence.is_async() {
@@ -180,6 +184,7 @@ where
         ops: Vec<Operation>,
         metrics_context: ApplyMetricsContext,
         guard: MutexGuard<'_, ()>,
+        _reader_guard: RwLockWriteGuard<'_, ()>,
     ) -> StoreResult<()> {
         let mut mutation_guard = Some(guard);
         tracing::debug!("Preparing journal");
@@ -304,7 +309,7 @@ where
     }
 
     fn revert_to_internal(&self, block: BlockId) -> StoreResult<()> {
-        let mut current_applied = self.persistence.applied_block_height();
+        let current_applied = self.persistence.applied_block_height();
         if block > current_applied {
             return Err(MhinStoreError::RollbackTargetAhead {
                 target: block,
@@ -312,23 +317,21 @@ where
             });
         }
 
-        if self.persistence.is_async() {
-            let durable = self.persistence.durable_block_height();
-            if durable < current_applied {
-                self.persistence.flush()?;
-                current_applied = self.persistence.applied_block_height();
-            }
-        }
-
-        if self.persistence.is_async() {
+        let is_async = self.persistence.is_async();
+        if is_async {
             self.persistence.set_rollback_barrier(block);
         }
 
+        let mut current_durable = self.persistence.durable_block_height();
+
         if block == current_applied {
+            if !is_async || block <= current_durable {
+                self.metadata.set_current_block(block)?;
+            }
             return Ok(());
         }
 
-        if self.persistence.is_async() {
+        if is_async {
             let cancelled = self.persistence.cancel_after(block);
             if !cancelled.is_empty() {
                 tracing::debug!(
@@ -349,7 +352,7 @@ where
             }
         }
 
-        let current_durable = self.metadata.current_block()?;
+        current_durable = self.persistence.durable_block_height();
         if block > current_durable {
             self.persistence
                 .update_key_count(self.state_engine.total_keys());
@@ -364,6 +367,7 @@ where
             .unwrap_or(0);
 
         let range_start = actual_target.saturating_add(1);
+        current_durable = self.persistence.durable_block_height();
         let revert_offsets = if range_start <= current_durable {
             self.metadata
                 .get_journal_offsets(range_start..=current_durable)?
@@ -384,10 +388,10 @@ where
         self.journal.truncate_after(actual_target)?;
         self.metadata.remove_journal_offsets_after(actual_target)?;
 
-        self.metadata.set_current_block(actual_target)?;
+        self.metadata.set_current_block(block)?;
         self.snapshotter.prune_snapshots_after(actual_target)?;
         self.persistence.set_durable_block(actual_target);
-        self.persistence.set_applied_block(actual_target);
+        self.persistence.set_applied_block(block);
 
         self.persistence
             .update_key_count(self.state_engine.total_keys());
@@ -426,6 +430,34 @@ where
         }
         self.persistence.set_applied_block(durable);
     }
+
+    fn lookup_batch(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.check_health()?;
+
+        let start = Instant::now();
+        let _reader_guard = self.reader_gate.read();
+        let lookup_results = self.state_engine.lookup_many(keys);
+        let duration = start.elapsed();
+
+        self.persistence
+            .metrics()
+            .record_lookup_batch(keys.len(), duration);
+
+        tracing::trace!(
+            key_count = keys.len(),
+            duration_us = duration.as_micros(),
+            "Lookup batch executed"
+        );
+
+        Ok(lookup_results
+            .into_iter()
+            .map(|value| value.unwrap_or(0))
+            .collect())
+    }
 }
 
 impl<E, J, S, M> super::BlockOrchestrator for DefaultBlockOrchestrator<E, J, S, M>
@@ -437,6 +469,7 @@ where
 {
     #[tracing::instrument(skip(self, ops), fields(block_height, ops_count = ops.len()))]
     fn apply_operations(&self, block_height: BlockId, ops: Vec<Operation>) -> StoreResult<()> {
+        self.persistence.enforce_snapshot_freshness()?;
         let start = Instant::now();
         let guard = self.update_mutex.lock();
 
@@ -444,13 +477,14 @@ where
 
         tracing::debug!("Acquiring mutation mutex");
         self.validate_block_height(block_height)?;
+        let reader_guard = self.reader_gate.write();
 
         let metrics_context = ApplyMetricsContext::from_ops(start, &ops);
         if ops.is_empty() {
-            return self.apply_empty_block(block_height, metrics_context, guard);
+            return self.apply_empty_block(block_height, metrics_context, guard, reader_guard);
         }
 
-        self.apply_non_empty_block(block_height, ops, metrics_context, guard)
+        self.apply_non_empty_block(block_height, ops, metrics_context, guard, reader_guard)
     }
 
     #[tracing::instrument(skip(self), fields(target_block = block))]
@@ -459,6 +493,7 @@ where
         let _guard = self.update_mutex.lock();
 
         self.check_health()?;
+        let _reader_guard = self.reader_gate.write();
 
         tracing::debug!("Starting rollback");
         match self.revert_to_internal(block) {
@@ -482,21 +517,17 @@ where
 
     #[tracing::instrument(skip(self), fields(key = ?key))]
     fn fetch(&self, key: crate::types::Key) -> StoreResult<Value> {
-        self.check_health()?;
+        let mut values = self.lookup_batch(std::slice::from_ref(&key))?;
+        Ok(values.pop().unwrap_or(0))
+    }
 
-        let start = Instant::now();
-        let result = self.state_engine.lookup(&key);
-        let duration = start.elapsed();
-        self.persistence.metrics().record_lookup(duration);
+    #[tracing::instrument(skip(self, keys), fields(key_count = keys.len()))]
+    fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        tracing::trace!(
-            key = ?key,
-            found = result.is_some(),
-            duration_us = duration.as_micros(),
-            "Lookup performed"
-        );
-
-        Ok(result.unwrap_or(0))
+        self.lookup_batch(keys)
     }
 
     fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
@@ -520,6 +551,7 @@ where
     fn shutdown(&self) -> StoreResult<()> {
         let _guard = self.update_mutex.lock();
         self.check_health()?;
+        let _reader_guard = self.reader_gate.write();
         self.persistence.flush()?;
 
         let durable_block = self.persistence.durable_block_height();
@@ -545,5 +577,9 @@ where
 
     fn ensure_healthy(&self) -> StoreResult<()> {
         self.check_health()
+    }
+
+    fn record_fatal_error(&self, block: BlockId, reason: String) {
+        self.set_fatal_error(block, reason);
     }
 }

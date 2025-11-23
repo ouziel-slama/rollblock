@@ -12,7 +12,7 @@ cargo add rollblock
 Or edit `Cargo.toml` manually:
 ```toml
 [dependencies]
-rollblock = "0.1"
+rollblock = "0.2"
 ```
 
 > Developing inside this repository? Keep using the workspace path
@@ -122,6 +122,37 @@ let config = StoreConfig::new(
 - **No compression** favors raw throughput; flip it on only if disk becomes the bottleneck.
 - **Async depth 4 096** lets the persistence pipeline absorb spikes without stalling producers.
 
+## Remote Server Opt-In
+
+`StoreConfig::new` still carries default `RemoteServerSettings`, but the embedded
+server now starts **only** when you flip the new `enable_server` flag (or call
+`.with_remote_server(...)`, which enables it automatically).
+
+```rust
+use rollblock::{MhinStoreFacade, RemoteServerSettings, StoreConfig};
+
+let server = RemoteServerSettings::default()
+    .with_bind_address("0.0.0.0:9443".parse().unwrap())
+    .with_basic_auth("replica", "super-secret")
+    .with_tls("/etc/rollblock/server.crt", "/etc/rollblock/server.key");
+
+let config = StoreConfig::new("./data", 4, 1000, 1, false)
+    .with_remote_server(server);
+
+// Or rely on the defaults while still exposing the server:
+let default_server = StoreConfig::new("./data", 4, 1000, 1, false).enable_remote_server()?;
+
+let store = MhinStoreFacade::new(config)?;
+```
+
+Need to keep networking off (e.g. for unit tests)? Simply skip the `.enable_remote_server()`
+call—the server remains disabled. `StoreConfig::without_remote_server()` removes
+the settings entirely so later builders can't accidentally opt in.
+
+Metrics become available through `store.remote_server_metrics()` once the server
+is enabled. The `ServerMetricsSnapshot` reports active connection counts, total
+requests, failures, and average latency.
+
 ## Basic Operations
 
 ### SET (new key)
@@ -173,6 +204,18 @@ if value == 0 {
 }
 ```
 
+### MULTI_GET (batched reads)
+
+```rust
+let keys = [[1u8; 8], [2u8; 8], [3u8; 8]];
+let values = store.multi_get(&keys)?;
+assert_eq!(values, vec![10, 0, 27]);
+```
+
+`multi_get` returns values in the same order as the provided keys and substitutes
+`0` for missing rows. Internally it only acquires the read gate once, so prefer
+it for any request that touches more than one key.
+
 ## Block-Staged Updates
 
 For workflows that require staging multiple operations before committing them as a block, use `MhinStoreBlockFacade`. It exposes a transactional API with intermediate reads that reflect pending changes:
@@ -193,6 +236,10 @@ block_store.set(Operation {
 
 // Intermediate reads reflect staged operations
 assert_eq!(block_store.get([1, 2, 3, 4, 5, 6, 7, 8])?, 42);
+assert_eq!(
+    block_store.multi_get(&[[1, 2, 3, 4, 5, 6, 7, 8], [9, 9, 9, 9, 9, 9, 9, 9]])?,
+    vec![42, 0]
+);
 
 // Commit the staged block
 block_store.end_block()?;
@@ -200,6 +247,15 @@ block_store.end_block()?;
 // Rollbacks are still available (requires no block in progress)
 block_store.rollback(50)?;
 ```
+
+> **Fatal failures:** If `end_block` returns an error, the pending block is
+> discarded and the facade records a fatal durability error. All subsequent
+> operations (including `start_block`, `set`, `get`, `rollback`, and `close`)
+> will return `MhinStoreError::DurabilityFailure` until the store is reopened.
+
+`block_store.multi_get(...)` mirrors the base facade call but merges staged
+operations before consulting the committed state, so it is safe to batch reads
+even while a block is in progress.
 
 ### Lifecycle Guarantees
 
@@ -331,6 +387,32 @@ assert_eq!(store.get(key_a)?, 0); // treated as delete
 - Setting `value = 0` removes the key; non-zero values are persisted as data.
 - The delete translation happens before journaling, so checkpoints and rollbacks observe delete semantics.
 - Metrics split zero-based deletes from non-zero sets for observability.
+
+## Understanding Block Heights
+
+Rollblock exposes three related notions of “current block”:
+
+- `current_block()` – the last block height durably recorded in metadata. This is what reopen/recovery will start from.
+- `durable_block()` – the highest block whose journal + metadata writes have completed. It should match `current_block()` but is obtained from the orchestrator and therefore reflects any in-flight flush.
+- `applied_block()` – the highest block already applied in memory. In asynchronous durability modes this value can be **ahead** of the durable height while persistence catches up.
+
+Use them together to drive your control loop:
+
+```rust
+let applied = store.applied_block()?; // highest block the state machine has executed
+let durable = store.durable_block()?; // highest block safely persisted
+
+let next_block = applied + 1;
+if durable < applied {
+    tracing::debug!(
+        "persistence is catching up (applied {}, durable {})",
+        applied,
+        durable
+    );
+}
+```
+
+When deciding the next block height to submit, prefer `applied_block()` so you never attempt to reapply an in-memory block that is waiting for durability.
 
 ## Error Handling
 

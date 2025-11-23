@@ -6,7 +6,9 @@ use rollblock::metrics::HealthState;
 use rollblock::types::Operation;
 use rollblock::{DurabilityMode, MhinStoreError, StoreFacade, StoreResult};
 
-use super::e2e_support::{apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT};
+use super::e2e_support::{
+    apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT,
+};
 
 #[test]
 fn e2e_metrics_health() -> StoreResult<()> {

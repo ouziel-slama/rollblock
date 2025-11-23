@@ -10,8 +10,6 @@ pub mod types;
 
 pub mod prelude {
     pub use super::error::{MhinStoreError, StoreResult};
-    pub use super::facade::{
-        MhinStoreBlockFacade, MhinStoreFacade, StoreConfig, StoreFacade, StoreMode,
-    };
+    pub use super::facade::{MhinStoreBlockFacade, MhinStoreFacade, StoreConfig, StoreFacade};
     pub use super::types::*;
 }

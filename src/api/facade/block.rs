@@ -113,7 +113,27 @@ impl MhinStoreBlockFacade {
                 *guard = None;
                 Ok(())
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                tracing::error!(
+                    block_height,
+                    error = ?err,
+                    "Failed to finalize staged block; marking store as fatal"
+                );
+                if let Some(metrics) = self.inner.metrics() {
+                    metrics.record_failure();
+                }
+                *guard = None;
+
+                let reason = format!("block facade failed to finalize block: {err}");
+                self.inner
+                    .orchestrator()
+                    .record_fatal_error(block_height, reason.clone());
+
+                Err(MhinStoreError::DurabilityFailure {
+                    block: block_height,
+                    reason,
+                })
+            }
         }
     }
 
@@ -210,6 +230,50 @@ impl StoreFacade for MhinStoreBlockFacade {
         MhinStoreBlockFacade::get(self, key)
     }
 
+    fn multi_get(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
+        self.inner.durable_block()?;
+
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let staged_hits = {
+            let guard = self.lock_pending()?;
+            guard.as_ref().map(|block| {
+                keys.iter()
+                    .map(|key| block.resolved_value(key).map(|value| value.unwrap_or(0)))
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let mut results = vec![0; keys.len()];
+        let mut missing = Vec::new();
+
+        if let Some(staged) = staged_hits {
+            for (idx, staged_value) in staged.into_iter().enumerate() {
+                if let Some(value) = staged_value {
+                    results[idx] = value;
+                } else {
+                    missing.push(idx);
+                }
+            }
+        } else {
+            missing.extend(0..keys.len());
+        }
+
+        if missing.is_empty() {
+            return Ok(results);
+        }
+
+        let fetch_keys: Vec<Key> = missing.iter().map(|&idx| keys[idx]).collect();
+        let fetched = self.inner.multi_get(&fetch_keys)?;
+        for (idx, value) in missing.into_iter().zip(fetched.into_iter()) {
+            results[idx] = value;
+        }
+
+        Ok(results)
+    }
+
     fn close(&self) -> StoreResult<()> {
         MhinStoreBlockFacade::close(self)
     }
@@ -219,7 +283,7 @@ impl StoreFacade for MhinStoreBlockFacade {
     }
 
     fn applied_block(&self) -> StoreResult<BlockId> {
-        Ok(self.inner.applied_block())
+        self.inner.applied_block()
     }
 
     fn durable_block(&self) -> StoreResult<BlockId> {

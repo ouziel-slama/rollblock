@@ -12,7 +12,7 @@ use crate::error::StoreResult;
 use crate::types::{BlockId, Key, Operation, Value};
 
 pub use block::MhinStoreBlockFacade;
-pub use config::{StoreConfig, StoreMode};
+pub use config::{RemoteServerSettings, StoreConfig};
 pub use core::MhinStoreFacade;
 
 /// Main interface for interacting with the state store.
@@ -83,6 +83,12 @@ pub trait StoreFacade: Send + Sync {
     /// }
     /// ```
     fn get(&self, key: Key) -> StoreResult<Value>;
+
+    /// Retrieves multiple values in a single call.
+    ///
+    /// Keys are returned in the same order they were provided. Missing keys
+    /// are represented as zeroes in the returned vector.
+    fn multi_get(&self, keys: &[Key]) -> StoreResult<Vec<Value>>;
 
     /// Flushes in-memory state and closes the store gracefully.
     fn close(&self) -> StoreResult<()>;

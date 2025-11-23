@@ -245,7 +245,8 @@ fn run_scenario(scenario: &Scenario, total_blocks: u64) -> Result<Duration, Box<
         INITIAL_CAPACITY_PER_SHARD,
         scenario.thread_count,
         false,
-    );
+    )
+    .without_remote_server();
     config = config.with_durability_mode(scenario.durability_mode.clone());
 
     let store = MhinStoreFacade::new(config)?;

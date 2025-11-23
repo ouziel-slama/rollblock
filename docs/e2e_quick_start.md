@@ -30,8 +30,6 @@ Launch the end-to-end (E2E) suite quickly, understand how scenarios are laid out
 
 - Standard E2E integration suite (≈3 min on a 12‑core laptop):
   - `cargo test --test e2e -- --nocapture`
-- Include optional slow and resilience checks (≈6 min):
-  - `cargo test --test e2e --features slow-tests -- --nocapture`
 - Enable verbose tracing when chasing race conditions:
   - `RUST_LOG=rollblock=debug cargo test --test e2e -- --nocapture`
 

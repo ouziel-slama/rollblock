@@ -85,25 +85,6 @@ impl LmdbMetadataStore {
         }
     }
 
-    /// Opens an existing LMDB metadata store in read-only mode with the default map size.
-    pub fn open_read_only(path: impl AsRef<Path>) -> StoreResult<Self> {
-        Self::open_read_only_with_map_size(path, Self::DEFAULT_MAP_SIZE)
-    }
-
-    /// Opens an existing LMDB metadata store in read-only mode with a custom map size.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Directory path for the LMDB environment
-    /// * `map_size` - Maximum size in bytes for the LMDB database
-    pub fn open_read_only_with_map_size(
-        path: impl AsRef<Path>,
-        map_size: usize,
-    ) -> StoreResult<Self> {
-        let handles = env::open_ro(path.as_ref(), map_size)?;
-        Ok(Self::from_handles(handles))
-    }
-
     pub fn load_shard_layout(&self) -> StoreResult<Option<ShardLayout>> {
         layout::load(self.env.as_ref(), &self.config_db, Self::SHARD_LAYOUT_KEY)
     }

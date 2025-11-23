@@ -6,7 +6,6 @@ This guide covers how to execute the automated test suite for Rollblock with a f
 
 - Run all fast checks: `cargo test`
 - Run the full E2E integration crate with captured logs: `cargo test --test e2e -- --nocapture`
-- Include the heavier benchmarks when needed: `cargo test --test e2e --features slow-tests -- --nocapture`
 
 ## End-to-End Scenarios
 
@@ -17,8 +16,7 @@ This guide covers how to execute the automated test suite for Rollblock with a f
 
 ## Slow & Optional Scenarios
 
-- The `slow-tests` Cargo feature gates long-running checks such as `e2e_large_batch_bounds`.
-- These tests are ignored by default; enable them explicitly with `cargo test --test e2e --features slow-tests -- --nocapture`.
+- Long-running E2E scenarios now run as part of the standard test suite; there is no dedicated feature flag to enable/disable them.
 
 ## Logging & Diagnostics
 
@@ -29,5 +27,5 @@ This guide covers how to execute the automated test suite for Rollblock with a f
 
 - **Permission denied or read-only journal paths**: confirm the working directory is writable and that the `journal` subdirectory under `target/testdata` inherits correct permissions.
 - **`DataDirLocked` errors**: ensure no other test or process is holding the store open. Removing stale directories under `target/testdata` typically clears the lock.
-- **Slow test flakiness**: when running with `--features slow-tests`, rerun with `RUST_LOG=rollblock=debug` for more insight or temporarily raise `DEFAULT_TIMEOUT` in `tests/common/e2e_support.rs`.
+- **Long scenario flakiness**: rerun with `RUST_LOG=rollblock=debug` for more insight or temporarily raise `DEFAULT_TIMEOUT` in `tests/common/e2e_support.rs`.
 

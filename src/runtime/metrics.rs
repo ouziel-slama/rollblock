@@ -138,7 +138,17 @@ impl StoreMetrics {
     }
 
     pub fn record_lookup(&self, duration: Duration) {
-        self.inner.lookups_performed.fetch_add(1, Ordering::Relaxed);
+        self.record_lookup_batch(1, duration);
+    }
+
+    pub fn record_lookup_batch(&self, key_count: usize, duration: Duration) {
+        if key_count == 0 {
+            return;
+        }
+
+        self.inner
+            .lookups_performed
+            .fetch_add(key_count as u64, Ordering::Relaxed);
 
         let duration_us = duration.as_micros() as u64;
         self.inner

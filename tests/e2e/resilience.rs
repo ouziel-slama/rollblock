@@ -3,9 +3,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::{Duration, Instant};
 
 use rollblock::types::Operation;
-use rollblock::{DurabilityMode, MhinStoreError, StoreFacade, StoreResult};
+use rollblock::{DurabilityMode, MhinStoreBlockFacade, MhinStoreError, StoreFacade, StoreResult};
 
-use super::e2e_support::{apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT};
+use super::e2e_support::{
+    apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT,
+};
 
 #[test]
 fn e2e_checksum_corruption() -> StoreResult<()> {
@@ -50,10 +52,6 @@ fn e2e_checksum_corruption() -> StoreResult<()> {
 }
 
 #[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "enable with --features slow-tests to include slow benchmarks"
-)]
 fn e2e_large_batch_bounds() -> StoreResult<()> {
     init_tracing();
 
@@ -99,6 +97,54 @@ fn e2e_large_batch_bounds() -> StoreResult<()> {
     assert_eq!(snapshot.checksum_errors, 0);
 
     store.close()?;
+
+    Ok(())
+}
+
+#[test]
+fn e2e_block_facade_end_block_failure_is_fatal() -> StoreResult<()> {
+    init_tracing();
+
+    let harness = StoreHarness::builder("block-facade-fatal").build();
+    let store = harness.open()?;
+    let block_facade = MhinStoreBlockFacade::from_facade(store.clone());
+    let key = [0xEFu8; 8];
+
+    block_facade.start_block(1)?;
+    block_facade.set(Operation { key, value: 11 })?;
+    block_facade.end_block()?;
+
+    block_facade.start_block(1)?;
+    block_facade.set(Operation { key, value: 9 })?;
+    let err = block_facade.end_block().unwrap_err();
+    match err {
+        MhinStoreError::DurabilityFailure { block, reason } => {
+            assert_eq!(block, 1);
+            assert!(
+                reason.contains("block facade failed"),
+                "reason should include the fatal facade failure: {reason}"
+            );
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    let start_err = block_facade.start_block(2).unwrap_err();
+    match start_err {
+        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
+        other => panic!("unexpected start_block error after fatal failure: {other:?}"),
+    }
+
+    match store.ensure_healthy() {
+        Err(MhinStoreError::DurabilityFailure { block, .. }) => assert_eq!(block, 1),
+        other => panic!("store should report fatal error after failed end_block: {other:?}"),
+    }
+
+    drop(block_facade);
+    drop(store);
+
+    let reopened = harness.reopen()?;
+    reopened.ensure_healthy()?;
+    reopened.close()?;
 
     Ok(())
 }

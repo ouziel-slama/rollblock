@@ -158,7 +158,9 @@ mod facade_tests {
     use std::collections::HashMap;
     use std::fs::{self, OpenOptions};
     use std::ops::RangeInclusive;
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Once;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -219,6 +221,10 @@ mod facade_tests {
             Ok(0)
         }
 
+        fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
+            Ok(vec![0; keys.len()])
+        }
+
         fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
             None
         }
@@ -246,11 +252,23 @@ mod facade_tests {
     }
 
     #[derive(Default)]
-    struct FailingOrchestrator;
+    struct FailingOrchestrator {
+        fatal: Mutex<Option<(BlockId, String)>>,
+    }
 
     impl FailingOrchestrator {
         fn new() -> Arc<Self> {
-            Arc::new(Self)
+            Arc::new(Self {
+                fatal: Mutex::new(None),
+            })
+        }
+
+        fn fatal_error(&self) -> Option<MhinStoreError> {
+            self.fatal
+                .lock()
+                .unwrap()
+                .clone()
+                .map(|(block, reason)| MhinStoreError::DurabilityFailure { block, reason })
         }
     }
 
@@ -292,6 +310,19 @@ mod facade_tests {
             Ok(self.state.lock().unwrap().get(&key).copied().unwrap_or(0))
         }
 
+        fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
+            {
+                let mut recorded = self.lookups.lock().unwrap();
+                recorded.extend(keys.iter().copied());
+            }
+
+            let state = self.state.lock().unwrap();
+            Ok(keys
+                .iter()
+                .map(|key| state.get(key).copied().unwrap_or(0))
+                .collect())
+        }
+
         fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
             None
         }
@@ -326,11 +357,18 @@ mod facade_tests {
         }
 
         fn revert_to(&self, _block: BlockId) -> StoreResult<()> {
+            self.ensure_healthy()?;
             Ok(())
         }
 
         fn fetch(&self, _key: Key) -> StoreResult<Value> {
+            self.ensure_healthy()?;
             Ok(0)
+        }
+
+        fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
+            self.ensure_healthy()?;
+            Ok(vec![0; keys.len()])
         }
 
         fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
@@ -338,6 +376,7 @@ mod facade_tests {
         }
 
         fn current_block(&self) -> StoreResult<BlockId> {
+            self.ensure_healthy()?;
             Ok(0)
         }
 
@@ -346,6 +385,7 @@ mod facade_tests {
         }
 
         fn durable_block_height(&self) -> StoreResult<BlockId> {
+            self.ensure_healthy()?;
             Ok(0)
         }
 
@@ -354,7 +394,18 @@ mod facade_tests {
         }
 
         fn ensure_healthy(&self) -> StoreResult<()> {
-            Ok(())
+            if let Some(err) = self.fatal_error() {
+                Err(err)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn record_fatal_error(&self, block: BlockId, reason: String) {
+            let mut guard = self.fatal.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some((block, reason));
+            }
         }
     }
 
@@ -458,16 +509,42 @@ mod facade_tests {
         }
     }
 
+    const TEST_LMDB_MAP_SIZE: usize = 32 << 20; // 32 MiB keeps tests lightweight.
+    static INIT_TESTDATA_ROOT: Once = Once::new();
+
+    fn workspace_tmp_dir() -> std::path::PathBuf {
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target/testdata/facade");
+        INIT_TESTDATA_ROOT.call_once(|| {
+            if std::env::var_os("ROLLBLOCK_KEEP_TESTDATA").is_none() {
+                let _ = std::fs::remove_dir_all(&base);
+            }
+        });
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn test_store_config(
+        data_dir: impl AsRef<Path>,
+        shards: usize,
+        initial_capacity: usize,
+        thread_count: usize,
+    ) -> StoreConfig {
+        StoreConfig::new(data_dir, shards, initial_capacity, thread_count, false)
+            .with_lmdb_map_size(TEST_LMDB_MAP_SIZE)
+            .without_remote_server()
+    }
+
     #[test]
     fn store_config_generates_expected_paths() {
         let tmp = tempdir().unwrap();
-        let config = StoreConfig::new(tmp.path(), 2, 16, 1, false);
+        let config = test_store_config(tmp.path(), 2, 16, 1);
 
         assert_eq!(config.data_dir, tmp.path());
         assert_eq!(config.shards_count, Some(2));
         assert_eq!(config.initial_capacity, Some(16));
         assert_eq!(config.thread_count, 1);
-        assert_eq!(config.mode, StoreMode::ReadWrite);
 
         assert_eq!(config.metadata_dir(), tmp.path().join("metadata"));
         assert_eq!(config.journal_dir(), tmp.path().join("journal"));
@@ -476,16 +553,15 @@ mod facade_tests {
 
     #[test]
     fn reopening_with_mismatched_shards_count_fails() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("store");
 
-        let initial_config = StoreConfig::new(&data_dir, 2, 64, 1, false);
+        let initial_config = test_store_config(&data_dir, 2, 64, 1);
         let store = MhinStoreFacade::new(initial_config).expect("initial store should open");
         drop(store);
 
-        let mismatched = StoreConfig::new(&data_dir, 3, 64, 1, false);
+        let mismatched = test_store_config(&data_dir, 3, 64, 1);
         let err = match MhinStoreFacade::new(mismatched) {
             Ok(_) => panic!("shard mismatch should error"),
             Err(err) => err,
@@ -503,7 +579,7 @@ mod facade_tests {
             other => panic!("unexpected error: {other:?}"),
         }
 
-        let capacity_mismatch = StoreConfig::new(&data_dir, 2, 128, 1, false);
+        let capacity_mismatch = test_store_config(&data_dir, 2, 128, 1);
         let err = match MhinStoreFacade::new(capacity_mismatch) {
             Ok(_) => panic!("capacity mismatch should error"),
             Err(err) => err,
@@ -523,30 +599,31 @@ mod facade_tests {
     }
 
     #[test]
-    fn read_only_open_uses_persisted_layout_when_optional_fields_missing() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+    fn existing_config_uses_persisted_layout_when_optional_fields_missing() {
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("store");
 
-        let initial_config = StoreConfig::new(&data_dir, 4, 32, 1, false);
+        let initial_config = test_store_config(&data_dir, 4, 32, 1);
         let store = MhinStoreFacade::new(initial_config).expect("initial store should open");
         drop(store);
 
-        let read_only = StoreConfig::existing(&data_dir).with_mode(StoreMode::ReadOnly);
-        let ro_store = MhinStoreFacade::new(read_only).expect("read-only store should open");
+        let existing = StoreConfig::existing_with_lmdb_map_size(&data_dir, TEST_LMDB_MAP_SIZE)
+            .without_remote_server();
+        assert_eq!(existing.shards_count, None);
+        assert_eq!(existing.initial_capacity, None);
 
-        assert_eq!(ro_store.current_block().unwrap(), 0);
+        let reopened = MhinStoreFacade::new(existing).expect("existing store should open");
+        assert_eq!(reopened.current_block().unwrap(), 0);
     }
 
     #[test]
     fn facade_new_initializes_components_and_executes_operations() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("store");
 
-        let config = StoreConfig::new(&data_dir, 4, 32, 1, false);
+        let config = test_store_config(&data_dir, 4, 32, 1);
         let facade = MhinStoreFacade::new(config).expect("facade should initialize");
 
         let key = [42u8; 8];
@@ -564,8 +641,11 @@ mod facade_tests {
         facade.close().expect("close should succeed");
         drop(facade);
 
-        let reopened =
-            MhinStoreFacade::new(StoreConfig::existing(&data_dir)).expect("reopen should succeed");
+        let reopened = MhinStoreFacade::new(
+            StoreConfig::existing_with_lmdb_map_size(&data_dir, TEST_LMDB_MAP_SIZE)
+                .without_remote_server(),
+        )
+        .expect("reopen should succeed");
         assert_eq!(reopened.get(key).unwrap(), 0);
     }
 
@@ -587,11 +667,10 @@ mod facade_tests {
 
     #[test]
     fn facade_new_uses_parallel_orchestrator_when_requested() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("parallel-store");
-        let config = StoreConfig::new(&data_dir, 8, 64, 4, false);
+        let config = test_store_config(&data_dir, 8, 64, 4);
 
         let facade = MhinStoreFacade::new(config).expect("parallel facade should initialize");
         let key_a = [1u8; 8];
@@ -659,12 +738,12 @@ mod facade_tests {
 
     #[test]
     fn restore_existing_state_skips_corrupted_snapshot() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let metadata_tmp = tempdir_in(&workspace_tmp).unwrap();
         let snapshots_tmp = tempdir_in(&workspace_tmp).unwrap();
 
-        let metadata = LmdbMetadataStore::new(metadata_tmp.path()).unwrap();
+        let metadata =
+            LmdbMetadataStore::new_with_map_size(metadata_tmp.path(), TEST_LMDB_MAP_SIZE).unwrap();
 
         let snapshotter = MmapSnapshotter::new(snapshots_tmp.path()).unwrap();
 
@@ -702,15 +781,15 @@ mod facade_tests {
 
     #[test]
     fn reconcile_metadata_with_journal_recovers_missing_entries() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
 
         let journal_dir = tmp.path().join("journal");
         let metadata_dir = tmp.path().join("metadata");
 
         let journal = FileBlockJournal::new(&journal_dir).expect("journal init");
-        let metadata = LmdbMetadataStore::new(&metadata_dir).expect("metadata init");
+        let metadata = LmdbMetadataStore::new_with_map_size(&metadata_dir, TEST_LMDB_MAP_SIZE)
+            .expect("metadata init");
 
         assert_eq!(metadata.current_block().unwrap(), 0);
 
@@ -770,15 +849,15 @@ mod facade_tests {
 
     #[test]
     fn reconcile_metadata_with_journal_rebuilds_missing_index() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
 
         let journal_dir = tmp.path().join("journal");
         let metadata_dir = tmp.path().join("metadata");
 
         let journal = FileBlockJournal::new(&journal_dir).expect("journal init");
-        let metadata = LmdbMetadataStore::new(&metadata_dir).expect("metadata init");
+        let metadata = LmdbMetadataStore::new_with_map_size(&metadata_dir, TEST_LMDB_MAP_SIZE)
+            .expect("metadata init");
 
         let block_height = 7;
         let undo = BlockUndo {
@@ -970,7 +1049,7 @@ mod facade_tests {
     }
 
     #[test]
-    fn block_facade_restores_pending_when_commit_fails() {
+    fn block_facade_commit_failure_is_fatal() {
         let orchestrator = FailingOrchestrator::new();
         let base = MhinStoreFacade::from_orchestrator(orchestrator);
         let facade = MhinStoreBlockFacade::from_facade(base);
@@ -978,41 +1057,45 @@ mod facade_tests {
 
         facade.start_block(1).unwrap();
         facade.set(Operation { key, value: 21 }).unwrap();
-        assert_eq!(facade.get(key).unwrap(), 21);
 
         let err = facade.end_block().unwrap_err();
-        assert!(
-            matches!(
-                err,
-                MhinStoreError::BlockIdNotIncreasing {
-                    block_height: 1,
-                    current: 1
-                }
-            ),
-            "end_block should surface underlying error"
-        );
+        match err {
+            MhinStoreError::DurabilityFailure { block, reason } => {
+                assert_eq!(block, 1);
+                assert!(
+                    reason.contains("block facade failed"),
+                    "reason should reference the fatal end_block failure: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
 
-        assert_eq!(
-            facade.get(key).unwrap(),
-            21,
-            "staged value should still be visible after failed commit"
-        );
+        let health_err = facade.ensure_healthy().unwrap_err();
+        match health_err {
+            MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
+            other => panic!("unexpected health error: {other:?}"),
+        }
 
-        let err = facade.start_block(2).unwrap_err();
-        assert!(
-            matches!(err, MhinStoreError::BlockInProgress { current: 1 }),
-            "pending block should remain active after failed commit"
-        );
+        let start_err = facade.start_block(2).unwrap_err();
+        match start_err {
+            MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
+            other => panic!("unexpected start_block error: {other:?}"),
+        }
+
+        let get_err = facade.get(key).unwrap_err();
+        match get_err {
+            MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
+            other => panic!("unexpected get error: {other:?}"),
+        }
     }
 
     #[test]
     fn graceful_shutdown_persists_state_for_restart() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("restartable-store");
 
-        let config = StoreConfig::new(&data_dir, 4, 32, 1, false);
+        let config = test_store_config(&data_dir, 4, 32, 1);
         let key = [0xABu8; 8];
 
         {
@@ -1029,12 +1112,11 @@ mod facade_tests {
 
     #[test]
     fn restart_without_snapshot_rebuilds_state_from_journal() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("crash-no-snapshot");
 
-        let config = StoreConfig::new(&data_dir, 2, 8, 1, false);
+        let config = test_store_config(&data_dir, 2, 8, 1);
         let key = [0xA5u8; 8];
 
         {
@@ -1055,7 +1137,8 @@ mod facade_tests {
         drop(reopened);
 
         let metadata =
-            LmdbMetadataStore::new(config.metadata_dir()).expect("metadata should reopen");
+            LmdbMetadataStore::new_with_map_size(config.metadata_dir(), TEST_LMDB_MAP_SIZE)
+                .expect("metadata should reopen");
         assert_eq!(
             metadata.current_block().unwrap(),
             1,
@@ -1065,12 +1148,11 @@ mod facade_tests {
 
     #[test]
     fn restart_replays_blocks_beyond_snapshot() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("crash-with-snapshot");
 
-        let config = StoreConfig::new(&data_dir, 2, 8, 1, false);
+        let config = test_store_config(&data_dir, 2, 8, 1);
         let key = [0xB6u8; 8];
 
         {
@@ -1106,7 +1188,8 @@ mod facade_tests {
         drop(reopened);
 
         let metadata =
-            LmdbMetadataStore::new(config.metadata_dir()).expect("metadata should reopen");
+            LmdbMetadataStore::new_with_map_size(config.metadata_dir(), TEST_LMDB_MAP_SIZE)
+                .expect("metadata should reopen");
         assert_eq!(
             metadata.current_block().unwrap(),
             2,
@@ -1116,12 +1199,11 @@ mod facade_tests {
 
     #[test]
     fn rollback_removes_newer_snapshots() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("rollback-prunes-snapshots");
 
-        let config = StoreConfig::new(&data_dir, 2, 8, 1, false);
+        let config = test_store_config(&data_dir, 2, 8, 1);
         let key = [0x11u8; 8];
         let snapshots_dir = data_dir.join("snapshots");
         let snapshot_path = |block: u64| snapshots_dir.join(format!("snapshot_{block:016x}.bin"));
@@ -1184,12 +1266,11 @@ mod facade_tests {
 
     #[test]
     fn rollback_persists_across_restart() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("rollback-persists");
 
-        let config = StoreConfig::new(&data_dir, 2, 16, 1, false);
+        let config = test_store_config(&data_dir, 2, 16, 1);
         let key = [0x33u8; 8];
 
         {
@@ -1218,7 +1299,8 @@ mod facade_tests {
         drop(reopened);
 
         let metadata =
-            LmdbMetadataStore::new(config.metadata_dir()).expect("metadata should reopen");
+            LmdbMetadataStore::new_with_map_size(config.metadata_dir(), TEST_LMDB_MAP_SIZE)
+                .expect("metadata should reopen");
         assert_eq!(
             metadata.current_block().unwrap(),
             1,
@@ -1228,12 +1310,11 @@ mod facade_tests {
 
     #[test]
     fn restart_after_truncated_journal_tail_discards_corrupted_block() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("truncated-tail");
 
-        let config = StoreConfig::new(&data_dir, 2, 16, 1, false);
+        let config = test_store_config(&data_dir, 2, 16, 1);
         let key = [0x44u8; 8];
 
         {
@@ -1273,7 +1354,8 @@ mod facade_tests {
         drop(reopened);
 
         let metadata =
-            LmdbMetadataStore::new(config.metadata_dir()).expect("metadata should reopen");
+            LmdbMetadataStore::new_with_map_size(config.metadata_dir(), TEST_LMDB_MAP_SIZE)
+                .expect("metadata should reopen");
         assert_eq!(
             metadata.current_block().unwrap(),
             1,
@@ -1368,13 +1450,69 @@ mod facade_tests {
     }
 
     #[test]
+    fn multi_get_preserves_order_and_zero_fill() {
+        let orchestrator = DummyOrchestrator::new();
+        {
+            let mut state = orchestrator.state.lock().unwrap();
+            state.insert([1u8; 8], 11);
+            state.insert([3u8; 8], 33);
+        }
+
+        let facade = MhinStoreFacade::new_for_testing(
+            orchestrator.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(1)),
+        );
+
+        let keys = [[1u8; 8], [2u8; 8], [3u8; 8]];
+        let values = facade.multi_get(&keys).expect("multi_get should succeed");
+
+        assert_eq!(values, vec![11, 0, 33]);
+    }
+
+    #[test]
+    fn block_facade_multi_get_includes_staged_operations() {
+        let orchestrator = DummyOrchestrator::new();
+        {
+            orchestrator.state.lock().unwrap().insert([9u8; 8], 5);
+        }
+
+        let inner = MhinStoreFacade::new_for_testing(
+            orchestrator.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(1)),
+        );
+        let block_facade = MhinStoreBlockFacade::from_facade(inner);
+
+        block_facade.start_block(1).expect("block should start");
+        block_facade
+            .set(Operation {
+                key: [1u8; 8],
+                value: 42,
+            })
+            .expect("staged insert should succeed");
+        block_facade
+            .set(Operation {
+                key: [9u8; 8],
+                value: 0,
+            })
+            .expect("staged delete should succeed");
+
+        let values = block_facade
+            .multi_get(&[[1u8; 8], [9u8; 8]])
+            .expect("multi_get should merge staged results");
+        assert_eq!(values, vec![42, 0]);
+
+        block_facade.end_block().expect("block should finalize");
+    }
+
+    #[test]
     fn block_facade_close_requires_no_pending_block() {
-        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
-        fs::create_dir_all(&workspace_tmp).unwrap();
+        let workspace_tmp = workspace_tmp_dir();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let data_dir = tmp.path().join("block-close");
 
-        let config = StoreConfig::new(&data_dir, 2, 8, 1, false);
+        let config = test_store_config(&data_dir, 2, 8, 1);
         let facade = MhinStoreBlockFacade::new(config).expect("block facade should initialize");
         facade.start_block(7).unwrap();
 

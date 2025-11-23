@@ -4,7 +4,7 @@ use std::io::Error;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ use rollblock::snapshot::Snapshotter;
 use rollblock::state_shard::StateShard;
 use rollblock::types::{BlockId, JournalMeta, Key, Operation, Value};
 use rollblock::FileBlockJournal;
+static INIT_TESTDATA_ROOT: Once = Once::new();
 use tempfile::{tempdir_in, TempDir};
 
 use rollblock::orchestrator::durability::{DurabilityMode, PersistenceSettings};
@@ -314,7 +315,15 @@ pub fn wait_for_block(metadata: &Arc<MemoryMetadataStore>, target: BlockId) {
 }
 
 pub fn workspace_tmp() -> PathBuf {
-    env::current_dir().unwrap().join("target/testdata")
+    let path = env::current_dir()
+        .unwrap()
+        .join("target/testdata/orchestrator");
+    INIT_TESTDATA_ROOT.call_once(|| {
+        if env::var_os("ROLLBLOCK_KEEP_TESTDATA").is_none() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    });
+    path
 }
 
 pub fn tempdir() -> TempDir {
@@ -327,6 +336,7 @@ pub fn synchronous_settings() -> PersistenceSettings {
     PersistenceSettings {
         durability_mode: DurabilityMode::Synchronous,
         snapshot_interval: Duration::from_secs(3600),
+        max_snapshot_interval: Duration::from_secs(3600),
     }
 }
 
@@ -334,5 +344,6 @@ pub fn async_settings(max_pending_blocks: usize) -> PersistenceSettings {
     PersistenceSettings {
         durability_mode: DurabilityMode::Async { max_pending_blocks },
         snapshot_interval: Duration::from_secs(3600),
+        max_snapshot_interval: Duration::from_secs(3600),
     }
 }

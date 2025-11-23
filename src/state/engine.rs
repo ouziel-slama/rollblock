@@ -28,6 +28,9 @@ pub trait StateEngine: Send + Sync {
     ) -> StoreResult<(StateStats, BlockUndo)>;
     fn revert(&self, block_height: BlockId, undo: BlockUndo) -> StoreResult<()>;
     fn lookup(&self, key: &Key) -> Option<Value>;
+    fn lookup_many(&self, keys: &[Key]) -> Vec<Option<Value>> {
+        keys.iter().map(|key| self.lookup(key)).collect()
+    }
     fn snapshot_shards(&self) -> Vec<Arc<dyn StateShard>>;
     fn total_keys(&self) -> usize {
         self.snapshot_shards()
@@ -152,6 +155,57 @@ where
         }
 
         revert_block(&self.shards, self.thread_pool.as_ref(), block_height, undo)
+    }
+
+    fn lookup_many(&self, keys: &[Key]) -> Vec<Option<Value>> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
+
+        if self.shards.is_empty() {
+            return vec![None; keys.len()];
+        }
+
+        struct ShardBatch {
+            positions: Vec<usize>,
+            keys: Vec<Key>,
+        }
+
+        impl ShardBatch {
+            fn new() -> Self {
+                Self {
+                    positions: Vec::new(),
+                    keys: Vec::new(),
+                }
+            }
+        }
+
+        let mut batches: Vec<ShardBatch> =
+            (0..self.shards.len()).map(|_| ShardBatch::new()).collect();
+
+        for (idx, key) in keys.iter().copied().enumerate() {
+            if let Some(shard_idx) = self.shard_index_for_key(&key) {
+                batches[shard_idx].positions.push(idx);
+                batches[shard_idx].keys.push(key);
+            }
+        }
+
+        let mut results = vec![None; keys.len()];
+        for (shard_idx, batch) in batches.into_iter().enumerate() {
+            if batch.keys.is_empty() {
+                continue;
+            }
+
+            if let Some(shard) = self.shards.get(shard_idx) {
+                let mut shard_out = vec![None; batch.keys.len()];
+                shard.get_many(&batch.keys, &mut shard_out);
+                for (pos, value) in batch.positions.into_iter().zip(shard_out.into_iter()) {
+                    results[pos] = value;
+                }
+            }
+        }
+
+        results
     }
 
     fn lookup(&self, key: &Key) -> Option<Value> {
@@ -288,6 +342,24 @@ mod tests {
 
         engine.revert(1, undo).unwrap();
         assert_eq!(engine.lookup(&key), None);
+    }
+
+    #[test]
+    fn lookup_many_returns_values_in_original_order() {
+        let metadata = Arc::new(MemoryMetadataStore::default());
+        let shard_a = Arc::new(RawTableShard::new(0, 8)) as Arc<dyn StateShard>;
+        let shard_b = Arc::new(RawTableShard::new(1, 8)) as Arc<dyn StateShard>;
+
+        shard_a.apply(&[shard_op([1u8; 8], 10)]);
+        shard_b.apply(&[shard_op([2u8; 8], 20)]);
+
+        let engine =
+            ShardedStateEngine::new(vec![Arc::clone(&shard_a), Arc::clone(&shard_b)], metadata);
+
+        let keys = vec![[2u8; 8], [3u8; 8], [1u8; 8]];
+        let results = engine.lookup_many(&keys);
+
+        assert_eq!(results, vec![Some(20), None, Some(10)]);
     }
 
     #[test]

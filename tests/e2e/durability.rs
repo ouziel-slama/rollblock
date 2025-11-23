@@ -8,7 +8,10 @@ use std::time::{Duration, SystemTime};
 use rollblock::types::Operation;
 use rollblock::{DurabilityMode, MhinStoreFacade, StoreConfig, StoreFacade, StoreResult};
 
-use super::e2e_support::{apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT};
+use super::e2e_support::{
+    apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT,
+    HARNESS_LMDB_MAP_SIZE,
+};
 
 #[test]
 fn e2e_async_durability_queue() -> StoreResult<()> {
@@ -30,7 +33,7 @@ fn e2e_async_durability_queue() -> StoreResult<()> {
     let mut lag_observed = false;
     for _ in 0..20 {
         let durable = store.durable_block()?;
-        let applied = store.applied_block();
+        let applied = store.applied_block()?;
         if applied > durable {
             lag_observed = true;
             break;
@@ -72,13 +75,13 @@ fn e2e_async_empty_block_waits_for_persistence() -> StoreResult<()> {
     apply_block(&store, 1, vec![Operation { key, value: 11 }])?;
     apply_block(&store, 2, Vec::new())?;
 
-    assert_eq!(store.applied_block(), 2, "empty block should be applied");
+    assert_eq!(store.applied_block()?, 2, "empty block should be applied");
 
     wait_for_durable(&store, 2, DEFAULT_TIMEOUT)?;
 
     assert_eq!(store.current_block()?, 2);
     assert_eq!(store.durable_block()?, 2);
-    assert_eq!(store.applied_block(), 2);
+    assert_eq!(store.applied_block()?, 2);
     assert_eq!(store.get(key)?, 11);
 
     store.ensure_healthy()?;
@@ -88,7 +91,7 @@ fn e2e_async_empty_block_waits_for_persistence() -> StoreResult<()> {
     let reopened = harness.reopen()?;
     assert_eq!(reopened.current_block()?, 2);
     assert_eq!(reopened.durable_block()?, 2);
-    assert_eq!(reopened.applied_block(), 2);
+    assert_eq!(reopened.applied_block()?, 2);
     assert_eq!(reopened.get(key)?, 11);
     reopened.ensure_healthy()?;
     reopened.close()?;
@@ -114,7 +117,9 @@ fn e2e_sync_empty_block_crash_helper() -> StoreResult<()> {
 
     // Apply an empty block and crash intentionally so the parent process can
     // assert that synchronous durability preserves the block height.
-    let mut config = StoreConfig::new(&data_dir, 4, 64, 1, false);
+    let mut config = StoreConfig::new(&data_dir, 4, 64, 1, false)
+        .with_lmdb_map_size(HARNESS_LMDB_MAP_SIZE)
+        .without_remote_server();
     config.durability_mode = DurabilityMode::Synchronous;
     let store = MhinStoreFacade::new(config)?;
 
@@ -159,7 +164,7 @@ fn e2e_sync_empty_block_survives_crash() -> StoreResult<()> {
 
     assert_eq!(reopened.current_block()?, 2);
     assert_eq!(reopened.durable_block()?, 2);
-    assert_eq!(reopened.applied_block(), 2);
+    assert_eq!(reopened.applied_block()?, 2);
     assert_eq!(reopened.get(key)?, 55);
 
     reopened.ensure_healthy()?;
@@ -181,13 +186,13 @@ fn e2e_sync_durability() -> StoreResult<()> {
     apply_block(&store, 1, vec![Operation { key, value: 11 }])?;
 
     assert_eq!(store.current_block()?, 1);
-    assert_eq!(store.applied_block(), 1);
+    assert_eq!(store.applied_block()?, 1);
     assert_eq!(store.durable_block()?, 1);
 
     apply_block(&store, 2, vec![Operation { key, value: 22 }])?;
 
     assert_eq!(store.current_block()?, 2);
-    assert_eq!(store.applied_block(), 2);
+    assert_eq!(store.applied_block()?, 2);
     assert_eq!(store.durable_block()?, 2);
     assert_eq!(store.get(key)?, 22);
 
@@ -221,7 +226,7 @@ fn e2e_restart_replays_journal() -> StoreResult<()> {
 
     let reopened = harness.reopen()?;
     assert_eq!(reopened.current_block()?, 2);
-    assert_eq!(reopened.applied_block(), 2);
+    assert_eq!(reopened.applied_block()?, 2);
     assert_eq!(reopened.durable_block()?, 2);
     assert_eq!(reopened.get(key)?, 202);
     reopened.ensure_healthy()?;
@@ -238,6 +243,7 @@ fn e2e_snapshot_refresh() -> StoreResult<()> {
             max_pending_blocks: 2,
         })
         .snapshot_interval(Duration::from_secs(1))
+        .max_snapshot_interval(Duration::from_secs(1))
         .build();
 
     let key = [0xD1u8; 8];
@@ -263,7 +269,7 @@ fn e2e_snapshot_refresh() -> StoreResult<()> {
 
     let reopened = harness.reopen()?;
     assert_eq!(reopened.current_block()?, 2);
-    assert_eq!(reopened.applied_block(), 2);
+    assert_eq!(reopened.applied_block()?, 2);
     assert_eq!(reopened.durable_block()?, 2);
     assert_eq!(reopened.get(key)?, 404);
     reopened.ensure_healthy()?;

@@ -110,52 +110,6 @@ pub(crate) fn restore_existing_state(
     Ok(0)
 }
 
-pub(crate) fn restore_existing_state_read_only(
-    snapshotter: &MmapSnapshotter,
-    metadata: &LmdbMetadataStore,
-    shards: &[Arc<dyn StateShard>],
-) -> StoreResult<BlockId> {
-    let recorded_current = metadata.current_block()?;
-    let snapshots = snapshotter.snapshots_desc()?;
-
-    for (path, snapshot_block) in snapshots {
-        if snapshot_block > recorded_current && recorded_current != 0 {
-            tracing::info!(
-                block_height = snapshot_block,
-                current_block = recorded_current,
-                path = ?path,
-                "Skipping snapshot newer than metadata in read-only mode"
-            );
-            continue;
-        }
-
-        match snapshotter.load_snapshot(&path, shards) {
-            Ok(loaded_block) => {
-                if loaded_block != snapshot_block {
-                    tracing::warn!(
-                        expected = snapshot_block,
-                        actual = loaded_block,
-                        "Snapshot block mismatch while opening in read-only mode"
-                    );
-                }
-                return Ok(loaded_block);
-            }
-            Err(MhinStoreError::SnapshotCorrupted { reason, .. }) => {
-                tracing::warn!(
-                    block_height = snapshot_block,
-                    path = ?path,
-                    %reason,
-                    "Encountered corrupted snapshot while opening in read-only mode"
-                );
-                continue;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-
-    Ok(0)
-}
-
 pub(crate) fn replay_committed_blocks<J, M>(
     journal: &J,
     metadata: &M,
@@ -179,12 +133,6 @@ where
     let start_block = restored_block.saturating_add(1);
     let mut metas = metadata.get_journal_offsets(start_block..=target_block)?;
     if metas.is_empty() {
-        tracing::error!(
-            start_block,
-            target_block,
-            restored_block,
-            "Metadata current block is ahead of snapshot but no journal offsets are available"
-        );
         return Err(MhinStoreError::MissingJournalEntry { block: start_block });
     }
 
@@ -215,7 +163,7 @@ where
     }
 
     if let Some(missing) = missing_blocks.first().copied() {
-        tracing::error!(
+        tracing::warn!(
             start_block,
             target_block,
             restored_block,
@@ -400,6 +348,11 @@ where
         journal.truncate_after(latest_verified)?;
         metadata.remove_journal_offsets_after(latest_verified)?;
         metadata.set_current_block(latest_verified)?;
+        tracing::info!(
+            current_block,
+            latest_verified,
+            "Metadata ahead of journal; truncated tail and aligned metadata to last durable block"
+        );
     }
 
     metadata.current_block()

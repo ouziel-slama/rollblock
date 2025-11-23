@@ -13,12 +13,10 @@ pub mod durability;
 pub mod persistence;
 
 mod default;
-mod read_only;
 
 pub use default::DefaultBlockOrchestrator;
 pub use durability::{DurabilityMode, PersistenceSettings};
 pub use persistence::PersistenceContext;
-pub use read_only::ReadOnlyBlockOrchestrator;
 
 use crate::error::StoreResult;
 use crate::metrics::StoreMetrics;
@@ -29,10 +27,16 @@ pub trait BlockOrchestrator: Send + Sync {
     fn apply_operations(&self, block_height: BlockId, ops: Vec<Operation>) -> StoreResult<()>;
     fn revert_to(&self, block: BlockId) -> StoreResult<()>;
     fn fetch(&self, key: Key) -> StoreResult<Value>;
+    fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>>;
     fn metrics(&self) -> Option<&StoreMetrics>;
     fn current_block(&self) -> StoreResult<BlockId>;
     fn applied_block_height(&self) -> BlockId;
     fn durable_block_height(&self) -> StoreResult<BlockId>;
     fn shutdown(&self) -> StoreResult<()>;
     fn ensure_healthy(&self) -> StoreResult<()>;
+    /// Records a fatal durability error so subsequent calls fail fast.
+    ///
+    /// Implementations that do not track fatal state can keep the default
+    /// no-op behavior.
+    fn record_fatal_error(&self, _block: BlockId, _reason: String) {}
 }

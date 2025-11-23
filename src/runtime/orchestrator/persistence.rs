@@ -60,14 +60,24 @@ where
         update_mutex: Arc<Mutex<()>>,
         settings: &PersistenceSettings,
     ) -> StoreResult<Self> {
-        let current_block = metadata.current_block()?;
+        let mut current_block = metadata.current_block()?;
+        let durable_block_height = metadata
+            .last_journal_offset_at_or_before(BlockId::MAX)?
+            .map(|meta| meta.block_height)
+            .unwrap_or(current_block);
+
+        if current_block < durable_block_height {
+            current_block = durable_block_height;
+            metadata.set_current_block(current_block)?;
+        }
+
         let metrics = StoreMetrics::new();
         metrics.update_key_count(state_engine.total_keys());
-        metrics.update_durable_block(current_block);
+        metrics.update_durable_block(durable_block_height);
         metrics.update_applied_block(current_block);
 
         let pending_blocks = Arc::new(PendingBlocks::new());
-        let durable_block = Arc::new(AtomicU64::new(current_block));
+        let durable_block = Arc::new(AtomicU64::new(durable_block_height));
         let applied_block = Arc::new(AtomicU64::new(current_block));
         let rollback_barrier = Arc::new(AtomicU64::new(current_block));
 
@@ -88,6 +98,7 @@ where
                 Arc::clone(&rollback_barrier),
                 Arc::clone(&update_mutex),
                 settings.snapshot_interval,
+                settings.max_snapshot_interval,
             ))
         } else {
             None
@@ -165,6 +176,13 @@ where
     pub fn flush(&self) -> StoreResult<()> {
         match &self.runtime {
             Some(runtime) => runtime.flush(),
+            None => Ok(()),
+        }
+    }
+
+    pub fn enforce_snapshot_freshness(&self) -> StoreResult<()> {
+        match &self.runtime {
+            Some(runtime) => runtime.force_snapshot_if_overdue(),
             None => Ok(()),
         }
     }

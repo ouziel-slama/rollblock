@@ -20,7 +20,6 @@ pub struct FileBlockJournal {
     index_path: PathBuf,
     write_lock: Mutex<()>,
     options: JournalOptions,
-    read_only: bool,
 }
 
 impl FileBlockJournal {
@@ -48,37 +47,7 @@ impl FileBlockJournal {
             index_path,
             write_lock: Mutex::new(()),
             options,
-            read_only: false,
         })
-    }
-
-    pub fn open_read_only(root_dir: impl AsRef<Path>) -> StoreResult<Self> {
-        let root_dir = root_dir.as_ref().to_path_buf();
-        if !root_dir.exists() {
-            return Err(MhinStoreError::MissingMetadata("journal directory"));
-        }
-        let journal_path = root_dir.join(Self::JOURNAL_FILE_NAME);
-        if !journal_path.exists() {
-            return Err(MhinStoreError::MissingMetadata("journal.bin"));
-        }
-        let index_path = root_dir.join(Self::INDEX_FILE_NAME);
-
-        Ok(Self {
-            root_dir,
-            journal_path,
-            index_path,
-            write_lock: Mutex::new(()),
-            options: JournalOptions::default(),
-            read_only: true,
-        })
-    }
-
-    fn ensure_writable(&self, operation: &'static str) -> StoreResult<()> {
-        if self.read_only {
-            Err(MhinStoreError::ReadOnlyOperation { operation })
-        } else {
-            Ok(())
-        }
     }
 
     pub fn root_dir(&self) -> &Path {
@@ -86,7 +55,6 @@ impl FileBlockJournal {
     }
 
     fn open_journal_for_write(&self) -> StoreResult<(File, bool)> {
-        self.ensure_writable("open_journal_for_write")?;
         let existed = self.journal_path.exists();
         let file = OpenOptions::new()
             .create(true)
@@ -97,7 +65,6 @@ impl FileBlockJournal {
     }
 
     fn open_index_for_append(&self) -> StoreResult<(File, bool)> {
-        self.ensure_writable("open_index_for_append")?;
         let existed = self.index_path.exists();
         let file = OpenOptions::new()
             .create(true)
@@ -151,7 +118,6 @@ impl BlockJournal for FileBlockJournal {
         undo: &BlockUndo,
         operations: &[Operation],
     ) -> StoreResult<JournalMeta> {
-        self.ensure_writable("append")?;
         if undo.block_height != block {
             return Err(MhinStoreError::JournalBlockIdMismatch {
                 expected: block,
@@ -257,7 +223,6 @@ impl BlockJournal for FileBlockJournal {
     }
 
     fn truncate_after(&self, block: BlockId) -> StoreResult<()> {
-        self.ensure_writable("truncate_after")?;
         let _guard = self.write_lock.lock();
 
         if !self.journal_path.exists() {
@@ -269,7 +234,6 @@ impl BlockJournal for FileBlockJournal {
     }
 
     fn rewrite_index(&self, metas: &[JournalMeta]) -> StoreResult<()> {
-        self.ensure_writable("rewrite_index")?;
         let _guard = self.write_lock.lock();
         super::maintenance::rewrite_index(&self.index_path, metas)
     }

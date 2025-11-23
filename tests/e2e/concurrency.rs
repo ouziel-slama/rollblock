@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use rollblock::types::Operation;
 use rollblock::{DurabilityMode, MhinStoreError, MhinStoreFacade, StoreFacade, StoreResult};
 
-use super::e2e_support::{apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT};
+use super::e2e_support::{
+    apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT,
+};
 
 const FINAL_BLOCK: u64 = 5;
 
@@ -136,7 +138,7 @@ fn e2e_lock_contention() -> StoreResult<()> {
     };
     match err {
         MhinStoreError::DataDirLocked { requested, .. } => {
-            assert_eq!(requested, "read-write");
+            assert_eq!(requested, "exclusive");
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -193,7 +195,7 @@ fn e2e_parallel_execution() -> StoreResult<()> {
     store.ensure_healthy()?;
 
     assert_eq!(store.current_block()?, BLOCK_COUNT);
-    assert_eq!(store.applied_block(), BLOCK_COUNT);
+    assert_eq!(store.applied_block()?, BLOCK_COUNT);
     assert_eq!(store.durable_block()?, BLOCK_COUNT);
 
     for (i, &key) in keys.iter().enumerate() {
