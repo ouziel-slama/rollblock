@@ -84,6 +84,7 @@ mod tests {
     use super::*;
     use crate::error::MhinStoreError;
     use crate::state_shard::RawTableShard;
+    use crate::types::{Key, Value, ValueBuf, MAX_VALUE_BYTES};
     use format::{
         checksum_to_u64, SNAPSHOT_HEADER_RESERVED, SNAPSHOT_HEADER_SIZE_V2, SNAPSHOT_VERSION,
     };
@@ -92,6 +93,14 @@ mod tests {
     use std::fs::{self, File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use tempfile::tempdir_in;
+
+    fn buf(value: u64) -> ValueBuf {
+        ValueBuf::from(Value::from(value))
+    }
+
+    fn opt_value(buf: Option<ValueBuf>) -> Option<Value> {
+        buf.map(Value::from)
+    }
 
     #[test]
     fn create_and_load_snapshot_with_empty_shards() {
@@ -115,6 +124,49 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_round_trip_variable_length_values() {
+        let workspace_tmp = env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let snapshotter = MmapSnapshotter::new(tmp.path()).unwrap();
+
+        let shards: Vec<Arc<dyn StateShard>> = vec![Arc::new(RawTableShard::new(0, 8))];
+
+        let expected_entries: Vec<(Key, Vec<u8>)> = vec![
+            ([0u8; 8], vec![1, 2, 3, 4, 5, 6, 7]),
+            ([1u8; 8], vec![0xAA; 32]),
+            ([2u8; 8], vec![0x55; MAX_VALUE_BYTES]),
+        ];
+
+        shards[0].import_data(
+            expected_entries
+                .iter()
+                .map(|(key, bytes)| (*key, ValueBuf::from_slice(bytes)))
+                .collect(),
+        );
+
+        let snapshot_path = snapshotter
+            .create_snapshot(123, &shards)
+            .expect("snapshot creation succeeds");
+
+        let restore: Vec<Arc<dyn StateShard>> = vec![Arc::new(RawTableShard::new(0, 4))];
+        snapshotter
+            .load_snapshot(&snapshot_path, &restore)
+            .expect("snapshot loads");
+
+        let mut restored = restore[0].export_data();
+        restored.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        for ((expected_key, expected_bytes), (restored_key, restored_value)) in
+            expected_entries.iter().zip(restored.iter())
+        {
+            assert_eq!(expected_key, restored_key);
+            assert_eq!(expected_bytes.as_slice(), restored_value.as_slice());
+        }
+    }
+
+    #[test]
     fn load_snapshot_detects_checksum_mismatch() {
         let workspace_tmp = env::current_dir().unwrap().join("target/testdata");
         std::fs::create_dir_all(&workspace_tmp).unwrap();
@@ -127,7 +179,7 @@ mod tests {
             .collect();
 
         let key = [7u8; 8];
-        shards[0].import_data(vec![(key, 77)]);
+        shards[0].import_data(vec![(key, buf(77))]);
 
         let block_height = 55;
         let snapshot_path = snapshotter.create_snapshot(block_height, &shards).unwrap();
@@ -174,14 +226,14 @@ mod tests {
 
         let test_data = [
             vec![
-                ([1, 0, 0, 0, 0, 0, 0, 0], 100u64),
-                ([2, 0, 0, 0, 0, 0, 0, 0], 200u64),
+                ([1, 0, 0, 0, 0, 0, 0, 0], buf(100)),
+                ([2, 0, 0, 0, 0, 0, 0, 0], buf(200)),
             ],
-            vec![([3, 0, 0, 0, 0, 0, 0, 0], 300u64)],
+            vec![([3, 0, 0, 0, 0, 0, 0, 0], buf(300))],
             vec![],
             vec![
-                ([4, 0, 0, 0, 0, 0, 0, 0], 400u64),
-                ([5, 0, 0, 0, 0, 0, 0, 0], 500u64),
+                ([4, 0, 0, 0, 0, 0, 0, 0], buf(400)),
+                ([5, 0, 0, 0, 0, 0, 0, 0], buf(500)),
             ],
         ];
 
@@ -189,9 +241,18 @@ mod tests {
             shards[i].import_data(data.clone());
         }
 
-        assert_eq!(shards[0].get(&[1, 0, 0, 0, 0, 0, 0, 0]), Some(100));
-        assert_eq!(shards[1].get(&[3, 0, 0, 0, 0, 0, 0, 0]), Some(300));
-        assert_eq!(shards[3].get(&[5, 0, 0, 0, 0, 0, 0, 0]), Some(500));
+        assert_eq!(
+            opt_value(shards[0].get(&[1, 0, 0, 0, 0, 0, 0, 0])),
+            Some(100.into())
+        );
+        assert_eq!(
+            opt_value(shards[1].get(&[3, 0, 0, 0, 0, 0, 0, 0])),
+            Some(300.into())
+        );
+        assert_eq!(
+            opt_value(shards[3].get(&[5, 0, 0, 0, 0, 0, 0, 0])),
+            Some(500.into())
+        );
 
         let block_height = 123;
         let snapshot_path = snapshotter.create_snapshot(block_height, &shards).unwrap();
@@ -203,11 +264,26 @@ mod tests {
         let loaded_block = snapshotter.load_snapshot(&snapshot_path, &shards).unwrap();
         assert_eq!(loaded_block, block_height);
 
-        assert_eq!(shards[0].get(&[1, 0, 0, 0, 0, 0, 0, 0]), Some(100));
-        assert_eq!(shards[0].get(&[2, 0, 0, 0, 0, 0, 0, 0]), Some(200));
-        assert_eq!(shards[1].get(&[3, 0, 0, 0, 0, 0, 0, 0]), Some(300));
-        assert_eq!(shards[3].get(&[4, 0, 0, 0, 0, 0, 0, 0]), Some(400));
-        assert_eq!(shards[3].get(&[5, 0, 0, 0, 0, 0, 0, 0]), Some(500));
+        assert_eq!(
+            opt_value(shards[0].get(&[1, 0, 0, 0, 0, 0, 0, 0])),
+            Some(100.into())
+        );
+        assert_eq!(
+            opt_value(shards[0].get(&[2, 0, 0, 0, 0, 0, 0, 0])),
+            Some(200.into())
+        );
+        assert_eq!(
+            opt_value(shards[1].get(&[3, 0, 0, 0, 0, 0, 0, 0])),
+            Some(300.into())
+        );
+        assert_eq!(
+            opt_value(shards[3].get(&[4, 0, 0, 0, 0, 0, 0, 0])),
+            Some(400.into())
+        );
+        assert_eq!(
+            opt_value(shards[3].get(&[5, 0, 0, 0, 0, 0, 0, 0])),
+            Some(500.into())
+        );
     }
 
     #[test]
@@ -222,7 +298,7 @@ mod tests {
             .collect();
 
         let key = [1u8; 8];
-        shards[0].import_data(vec![(key, 42)]);
+        shards[0].import_data(vec![(key, buf(42))]);
 
         let block_height = 7;
         let first_path = snapshotter

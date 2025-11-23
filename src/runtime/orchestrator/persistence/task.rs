@@ -22,7 +22,7 @@ impl ApplyMetricsContext {
         let mut zero_delete_count = 0usize;
 
         for op in ops {
-            if op.value == 0 {
+            if op.value.is_delete() {
                 zero_delete_count += 1;
             } else {
                 set_count += 1;

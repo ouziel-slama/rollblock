@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use rollblock::metrics::HealthState;
 use rollblock::types::Operation;
+use rollblock::Value;
 use rollblock::{DurabilityMode, MhinStoreError, StoreFacade, StoreResult};
 
 use super::e2e_support::{
@@ -29,11 +30,11 @@ fn e2e_metrics_health() -> StoreResult<()> {
         vec![
             Operation {
                 key: key_a,
-                value: 10,
+                value: 10.into(),
             },
             Operation {
                 key: key_b,
-                value: 20,
+                value: 20.into(),
             },
         ],
     )?;
@@ -45,11 +46,11 @@ fn e2e_metrics_health() -> StoreResult<()> {
         vec![
             Operation {
                 key: key_a,
-                value: 15,
+                value: 15.into(),
             },
             Operation {
                 key: key_b,
-                value: 0,
+                value: Value::empty(),
             },
         ],
     )?;
@@ -78,7 +79,7 @@ fn e2e_metrics_health() -> StoreResult<()> {
         3,
         vec![Operation {
             key: key_a,
-            value: 99,
+            value: 99.into(),
         }],
     )
     .expect_err("set should fail when journal directory is missing");
@@ -117,7 +118,14 @@ fn e2e_error_propagation() -> StoreResult<()> {
 
     let key = [0xC3u8; 8];
 
-    apply_block(&store, 1, vec![Operation { key, value: 1 }])?;
+    apply_block(
+        &store,
+        1,
+        vec![Operation {
+            key,
+            value: 1.into(),
+        }],
+    )?;
     wait_for_durable(&store, 1, DEFAULT_TIMEOUT)?;
 
     let journal_dir = harness.data_dir().join("journal");
@@ -127,7 +135,14 @@ fn e2e_error_propagation() -> StoreResult<()> {
     }
     fs::rename(&journal_dir, &backup_dir)?;
 
-    apply_block(&store, 2, vec![Operation { key, value: 2 }])?;
+    apply_block(
+        &store,
+        2,
+        vec![Operation {
+            key,
+            value: 2.into(),
+        }],
+    )?;
 
     assert_eq!(store.get(key)?, 2);
 

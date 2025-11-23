@@ -10,7 +10,7 @@ use super::StoreFacade;
 struct PendingBlock {
     block_height: BlockId,
     operations: Vec<Operation>,
-    intermediate_state: HashMap<Key, Option<Value>>,
+    intermediate_state: HashMap<Key, Value>,
 }
 
 impl PendingBlock {
@@ -23,17 +23,17 @@ impl PendingBlock {
     }
 
     fn record_operation(&mut self, operation: Operation) {
-        if operation.value == 0 {
-            self.intermediate_state.insert(operation.key, None);
+        let staged_value = if operation.value.is_delete() {
+            Value::empty()
         } else {
-            self.intermediate_state
-                .insert(operation.key, Some(operation.value));
-        }
+            operation.value.clone()
+        };
+        self.intermediate_state.insert(operation.key, staged_value);
         self.operations.push(operation);
     }
 
-    fn resolved_value(&self, key: &Key) -> Option<Option<Value>> {
-        self.intermediate_state.get(key).copied()
+    fn resolved_value(&self, key: &Key) -> Option<Value> {
+        self.intermediate_state.get(key).cloned()
     }
 }
 
@@ -147,7 +147,7 @@ impl MhinStoreBlockFacade {
         };
 
         if let Some(staged) = staged {
-            return Ok(staged.unwrap_or(0));
+            return Ok(staged);
         }
 
         self.inner.get(key)
@@ -237,16 +237,16 @@ impl StoreFacade for MhinStoreBlockFacade {
             return Ok(Vec::new());
         }
 
-        let staged_hits = {
+        let staged_hits: Option<Vec<Option<Value>>> = {
             let guard = self.lock_pending()?;
             guard.as_ref().map(|block| {
                 keys.iter()
-                    .map(|key| block.resolved_value(key).map(|value| value.unwrap_or(0)))
+                    .map(|key| block.resolved_value(key))
                     .collect::<Vec<_>>()
             })
         };
 
-        let mut results = vec![0; keys.len()];
+        let mut results = vec![Value::empty(); keys.len()];
         let mut missing = Vec::new();
 
         if let Some(staged) = staged_hits {

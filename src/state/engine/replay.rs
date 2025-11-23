@@ -28,7 +28,7 @@ pub(crate) fn plan_replay_delta(
 
         delta.operations.push(ShardOp {
             key: op.key,
-            value: op.value,
+            value: op.value.clone(),
         });
     }
 

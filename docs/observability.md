@@ -38,7 +38,7 @@ if let Some(remote) = store.remote_server_metrics() {
 #### Counters
 - `operations_applied` - Total number of operations applied
 - `set_operations_applied` - Total number of set operations applied
-- `zero_value_deletes_applied` - Total number of zero-value delete operations applied
+- `zero_value_deletes_applied` - Total number of empty-value (`Value::empty()`) delete operations applied
 - `blocks_committed` - Number of blocks successfully committed
 - `rollbacks_executed` - Number of rollback operations
 - `lookups_performed` - Total read operations

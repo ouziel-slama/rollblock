@@ -3,9 +3,10 @@ use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use blake3::Hash;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{MhinStoreError, StoreResult};
-use crate::types::{BlockId, JournalMeta, ShardUndo};
+use crate::types::{BlockId, BlockUndo, JournalMeta, Operation, Value, MAX_VALUE_BYTES};
 
 use super::JournalBlock;
 
@@ -14,6 +15,13 @@ pub(crate) const JOURNAL_VERSION: u16 = 1;
 pub(crate) const JOURNAL_HEADER_FLAG_NONE: u16 = 0;
 pub(crate) const JOURNAL_FLAG_UNCOMPRESSED: u16 = 0x0001;
 pub(crate) const JOURNAL_HEADER_SIZE: usize = 40;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct JournalBlockPayload {
+    pub block_height: BlockId,
+    pub undo: BlockUndo,
+    pub operations: Vec<u8>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct JournalHeader {
@@ -144,36 +152,156 @@ pub(crate) fn read_journal_block(file: &mut File, meta: &JournalMeta) -> StoreRe
         });
     }
 
-    let entry: JournalBlock = bincode::deserialize(&decompressed)?;
+    let payload: JournalBlockPayload = bincode::deserialize(&decompressed)?;
 
-    if entry.block_height != meta.block_height {
+    if payload.block_height != meta.block_height {
         return Err(MhinStoreError::JournalBlockIdMismatch {
             expected: meta.block_height,
-            found: entry.block_height,
+            found: payload.block_height,
         });
     }
 
-    let actual_entries: usize = entry
-        .undo
-        .shard_undos
-        .iter()
-        .map(|shard| shard.entries.len())
-        .sum();
+    let expected_count: usize =
+        header
+            .entry_count
+            .try_into()
+            .map_err(|_| MhinStoreError::InvalidJournalHeader {
+                reason: "entry count overflow",
+            })?;
 
-    if actual_entries as u32 != header.entry_count {
-        return Err(MhinStoreError::InvalidJournalHeader {
-            reason: "entry count mismatch",
-        });
-    }
+    let operations = decode_operations(&payload.operations, expected_count)?;
 
-    Ok(entry)
-}
-
-pub(crate) fn total_entry_count(shards: &[ShardUndo]) -> usize {
-    shards.iter().map(|shard| shard.entries.len()).sum()
+    Ok(JournalBlock {
+        block_height: payload.block_height,
+        operations,
+        undo: payload.undo,
+    })
 }
 
 pub(crate) fn checksum_to_u32(hash: Hash) -> u32 {
     let bytes = hash.as_bytes();
     u32::from_le_bytes(bytes[0..4].try_into().unwrap())
+}
+
+fn decode_operations(bytes: &[u8], expected_count: usize) -> StoreResult<Vec<Operation>> {
+    const ENTRY_OVERHEAD: usize = 8 + 2; // key + len
+
+    if bytes.is_empty() && expected_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    if expected_count > 0 {
+        let min_len = expected_count.checked_mul(ENTRY_OVERHEAD).ok_or(
+            MhinStoreError::InvalidJournalHeader {
+                reason: "operation payload overflow",
+            },
+        )?;
+        if bytes.len() < min_len {
+            return Err(MhinStoreError::InvalidJournalHeader {
+                reason: "operation payload truncated",
+            });
+        }
+    }
+
+    let mut cursor = 0usize;
+    let mut operations = Vec::with_capacity(expected_count);
+
+    while cursor < bytes.len() {
+        if cursor + ENTRY_OVERHEAD > bytes.len() {
+            return Err(MhinStoreError::InvalidJournalHeader {
+                reason: "operation payload truncated",
+            });
+        }
+
+        let mut key = [0u8; 8];
+        key.copy_from_slice(&bytes[cursor..cursor + 8]);
+        cursor += 8;
+
+        let value_len = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
+        cursor += 2;
+
+        if value_len > MAX_VALUE_BYTES {
+            return Err(MhinStoreError::InvalidJournalHeader {
+                reason: "operation value exceeds limit",
+            });
+        }
+
+        if cursor + value_len > bytes.len() {
+            return Err(MhinStoreError::InvalidJournalHeader {
+                reason: "operation payload truncated",
+            });
+        }
+
+        let value = Value::from_slice(&bytes[cursor..cursor + value_len]);
+        cursor += value_len;
+
+        operations.push(Operation { key, value });
+    }
+
+    if cursor != bytes.len() {
+        return Err(MhinStoreError::InvalidJournalHeader {
+            reason: "operation payload trailing bytes",
+        });
+    }
+
+    if operations.len() != expected_count {
+        return Err(MhinStoreError::InvalidJournalHeader {
+            reason: "entry count mismatch",
+        });
+    }
+
+    Ok(operations)
+}
+
+pub(crate) fn serialize_journal_block(
+    block_height: BlockId,
+    undo: &BlockUndo,
+    operations: &[Operation],
+) -> StoreResult<(Vec<u8>, u32)> {
+    let encoded_operations = encode_operations(operations)?;
+    let payload = JournalBlockPayload {
+        block_height,
+        undo: undo.clone(),
+        operations: encoded_operations,
+    };
+
+    let serialized = bincode::serialize(&payload)?;
+    let operation_count: u32 =
+        operations
+            .len()
+            .try_into()
+            .map_err(|_| MhinStoreError::InvalidJournalHeader {
+                reason: "operation count overflow",
+            })?;
+
+    Ok((serialized, operation_count))
+}
+
+fn encode_operations(operations: &[Operation]) -> StoreResult<Vec<u8>> {
+    let mut total_len: usize = 0;
+
+    for op in operations {
+        let value_len = op.value.len();
+        if value_len > MAX_VALUE_BYTES {
+            return Err(MhinStoreError::InvalidJournalHeader {
+                reason: "operation value exceeds limit",
+            });
+        }
+
+        total_len = total_len.checked_add(8 + 2 + value_len).ok_or(
+            MhinStoreError::InvalidJournalHeader {
+                reason: "operation payload overflow",
+            },
+        )?;
+    }
+
+    let mut buffer = Vec::with_capacity(total_len);
+    for op in operations {
+        buffer.extend_from_slice(&op.key);
+        let len = op.value.len() as u16;
+        buffer.extend_from_slice(&len.to_le_bytes());
+        buffer.extend_from_slice(op.value.as_slice());
+    }
+
+    Ok(buffer)
 }

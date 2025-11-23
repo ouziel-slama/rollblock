@@ -455,7 +455,7 @@ where
 
         Ok(lookup_results
             .into_iter()
-            .map(|value| value.unwrap_or(0))
+            .map(|value| value.map(Value::from).unwrap_or_else(Value::empty))
             .collect())
     }
 }
@@ -518,7 +518,7 @@ where
     #[tracing::instrument(skip(self), fields(key = ?key))]
     fn fetch(&self, key: crate::types::Key) -> StoreResult<Value> {
         let mut values = self.lookup_batch(std::slice::from_ref(&key))?;
-        Ok(values.pop().unwrap_or(0))
+        Ok(values.pop().unwrap_or_else(Value::empty))
     }
 
     #[tracing::instrument(skip(self, keys), fields(key_count = keys.len()))]

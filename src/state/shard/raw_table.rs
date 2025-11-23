@@ -5,11 +5,11 @@ use hashbrown::raw::RawTable;
 use parking_lot::RwLock;
 
 use super::StateShard;
-use crate::types::{Key, ShardOp, ShardStats, ShardUndo, UndoEntry, UndoOp, Value};
+use crate::types::{Key, ShardOp, ShardStats, ShardUndo, UndoEntry, UndoOp, Value, ValueBuf};
 
 pub struct RawTableShard {
     shard_index: usize,
-    table: RwLock<RawTable<(Key, Value)>>,
+    table: RwLock<RawTable<(Key, ValueBuf)>>,
     build_hasher: DefaultHashBuilder,
 }
 
@@ -64,21 +64,22 @@ impl StateShard for RawTableShard {
                 if let Some((key, previous)) =
                     table.remove_entry(hash, |(candidate, _)| candidate == &op.key)
                 {
+                    let previous_value = Value::from(previous);
                     undo.entries.push(UndoEntry {
                         key,
-                        previous: Some(previous),
+                        previous: Some(previous_value),
                         op: UndoOp::Deleted,
                     });
                 }
             } else {
-                let value = op.value;
+                let value_buf = ValueBuf::from(&op.value);
                 let hash = self.hash_key(&op.key);
                 if let Some((_, existing_value)) =
                     table.get_mut(hash, |(candidate, _)| candidate == &op.key)
                 {
-                    let previous = *existing_value;
-                    if previous != value {
-                        *existing_value = value;
+                    let previous = Value::from(existing_value.clone());
+                    if previous != op.value {
+                        *existing_value = value_buf.clone();
                     }
                     undo.entries.push(UndoEntry {
                         key: op.key,
@@ -86,7 +87,7 @@ impl StateShard for RawTableShard {
                         op: UndoOp::Updated,
                     });
                 } else {
-                    table.insert(hash, (op.key, value), |(key, _)| {
+                    table.insert(hash, (op.key, value_buf), |(key, _)| {
                         Self::hash_with(&self.build_hasher, key)
                     });
                     undo.entries.push(UndoEntry {
@@ -110,22 +111,24 @@ impl StateShard for RawTableShard {
                     table.remove_entry(hash, |(key, _)| key == &entry.key);
                 }
                 UndoOp::Updated => {
-                    if let Some(previous) = entry.previous {
+                    if let Some(previous) = entry.previous.clone() {
                         if let Some((_, value)) = table.get_mut(hash, |(key, _)| key == &entry.key)
                         {
-                            *value = previous;
+                            *value = ValueBuf::from(previous);
                         } else {
-                            table.insert(hash, (entry.key, previous), |(key, _)| {
-                                Self::hash_with(&self.build_hasher, key)
-                            });
+                            table.insert(
+                                hash,
+                                (entry.key, ValueBuf::from(previous)),
+                                |(key, _)| Self::hash_with(&self.build_hasher, key),
+                            );
                         }
                     } else {
                         table.remove_entry(hash, |(key, _)| key == &entry.key);
                     }
                 }
                 UndoOp::Deleted => {
-                    if let Some(previous) = entry.previous {
-                        table.insert(hash, (entry.key, previous), |(key, _)| {
+                    if let Some(previous) = entry.previous.clone() {
+                        table.insert(hash, (entry.key, ValueBuf::from(previous)), |(key, _)| {
                             Self::hash_with(&self.build_hasher, key)
                         });
                     }
@@ -134,22 +137,22 @@ impl StateShard for RawTableShard {
         }
     }
 
-    fn get(&self, key: &Key) -> Option<Value> {
+    fn get(&self, key: &Key) -> Option<ValueBuf> {
         let table = self.table.read();
         let hash = self.hash_key(key);
         table
             .get(hash, |(candidate, _)| candidate == key)
-            .map(|(_, value)| *value)
+            .map(|(_, value)| value.clone())
     }
 
-    fn get_many(&self, keys: &[Key], out: &mut [Option<Value>]) {
+    fn get_many(&self, keys: &[Key], out: &mut [Option<ValueBuf>]) {
         debug_assert_eq!(keys.len(), out.len());
         let table = self.table.read();
         for (key, slot) in keys.iter().zip(out.iter_mut()) {
             let hash = self.hash_key(key);
             *slot = table
                 .get(hash, |(candidate, _)| candidate == key)
-                .map(|(_, value)| *value);
+                .map(|(_, value)| value.clone());
         }
     }
 
@@ -162,36 +165,35 @@ impl StateShard for RawTableShard {
         }
     }
 
-    fn export_data(&self) -> Vec<(Key, Value)> {
+    fn export_data(&self) -> Vec<(Key, ValueBuf)> {
         let table = self.table.read();
         let mut data = Vec::with_capacity(table.len());
 
         // SAFETY: RawTable::iter() provides valid bucket references for the lifetime
         // of the read guard. Each bucket contains a valid (Key, Value) tuple that was
-        // properly inserted via the StateShard trait methods. The data is Copy, so
-        // dereferencing is safe.
+        // properly inserted via the StateShard trait methods.
         unsafe {
             for bucket in table.iter() {
                 let (key, value) = bucket.as_ref();
-                data.push((*key, *value));
+                data.push((*key, value.clone()));
             }
         }
 
         data
     }
 
-    fn visit_entries(&self, visitor: &mut dyn FnMut(Key, Value)) {
+    fn visit_entries(&self, visitor: &mut dyn FnMut(Key, ValueBuf)) {
         let table = self.table.read();
 
         unsafe {
             for bucket in table.iter() {
                 let (key, value) = bucket.as_ref();
-                visitor(*key, *value);
+                visitor(*key, value.clone());
             }
         }
     }
 
-    fn import_data(&self, data: Vec<(Key, Value)>) {
+    fn import_data(&self, data: Vec<(Key, ValueBuf)>) {
         let mut table = self.table.write();
 
         table.clear();
@@ -219,33 +221,41 @@ mod tests {
         ShardOp { key, value }
     }
 
+    fn num(value: u64) -> Value {
+        Value::from(value)
+    }
+
+    fn delete() -> Value {
+        Value::empty()
+    }
+
     #[test]
     fn insert_update_delete_cycle() {
         let shard = RawTableShard::new(3, 16);
         let key = [0u8; 8];
 
-        let insert_undo = shard.apply(&[shard_op(key, 10)]);
+        let insert_undo = shard.apply(&[shard_op(key, num(10))]);
         assert_eq!(insert_undo.shard_index, 3);
         assert_eq!(insert_undo.entries.len(), 1);
         assert_eq!(insert_undo.entries[0].op, UndoOp::Inserted);
-        assert_eq!(shard.get(&key), Some(10));
+        assert_eq!(shard.get(&key).map(Value::from), Some(num(10)));
 
-        let update_undo = shard.apply(&[shard_op(key, 42)]);
+        let update_undo = shard.apply(&[shard_op(key, num(42))]);
         assert_eq!(update_undo.entries.len(), 1);
         assert_eq!(update_undo.entries[0].op, UndoOp::Updated);
-        assert_eq!(update_undo.entries[0].previous, Some(10));
-        assert_eq!(shard.get(&key), Some(42));
+        assert_eq!(update_undo.entries[0].previous, Some(num(10)));
+        assert_eq!(shard.get(&key).map(Value::from), Some(num(42)));
 
-        let delete_undo = shard.apply(&[shard_op(key, 0)]);
+        let delete_undo = shard.apply(&[shard_op(key, delete())]);
         assert_eq!(delete_undo.entries.len(), 1);
         assert_eq!(delete_undo.entries[0].op, UndoOp::Deleted);
         assert_eq!(shard.get(&key), None);
 
         shard.revert(&delete_undo);
-        assert_eq!(shard.get(&key), Some(42));
+        assert_eq!(shard.get(&key).map(Value::from), Some(num(42)));
 
         shard.revert(&update_undo);
-        assert_eq!(shard.get(&key), Some(10));
+        assert_eq!(shard.get(&key).map(Value::from), Some(num(10)));
 
         shard.revert(&insert_undo);
         assert_eq!(shard.get(&key), None);
@@ -258,13 +268,13 @@ mod tests {
         let key_b = [2u8; 8];
 
         let undo = shard.apply(&[
-            shard_op(key_a, 5),
-            shard_op(key_b, 7),
-            shard_op(key_a, 9),
-            shard_op(key_b, 0),
+            shard_op(key_a, num(5)),
+            shard_op(key_b, num(7)),
+            shard_op(key_a, num(9)),
+            shard_op(key_b, delete()),
         ]);
 
-        assert_eq!(shard.get(&key_a), Some(9));
+        assert_eq!(shard.get(&key_a).map(Value::from), Some(num(9)));
         assert_eq!(shard.get(&key_b), None);
         assert_eq!(undo.entries.len(), 4);
 
@@ -281,27 +291,36 @@ mod tests {
         let key_a = [3u8; 8];
         let key_b = [4u8; 8];
 
-        shard.apply(&[shard_op(key_a, 21), shard_op(key_b, 34)]);
+        shard.apply(&[shard_op(key_a, num(21)), shard_op(key_b, num(34))]);
 
         let mut data = shard.export_data();
         data.sort_by(|(a, _), (b, _)| a.cmp(b));
-        assert_eq!(data, vec![(key_a, 21), (key_b, 34)]);
+        assert_eq!(
+            data,
+            vec![
+                (key_a, ValueBuf::from(num(21))),
+                (key_b, ValueBuf::from(num(34)))
+            ]
+        );
     }
 
     #[test]
     fn import_data_replaces_existing_state() {
         let shard = RawTableShard::new(2, 2);
         let old_key = [5u8; 8];
-        shard.apply(&[shard_op(old_key, 99)]);
-        assert_eq!(shard.get(&old_key), Some(99));
+        shard.apply(&[shard_op(old_key, num(99))]);
+        assert_eq!(shard.get(&old_key).map(Value::from), Some(num(99)));
 
         let new_key_a = [8u8; 8];
         let new_key_b = [9u8; 8];
-        shard.import_data(vec![(new_key_a, 1), (new_key_b, 2)]);
+        shard.import_data(vec![
+            (new_key_a, ValueBuf::from(num(1))),
+            (new_key_b, ValueBuf::from(num(2))),
+        ]);
 
         assert_eq!(shard.get(&old_key), None);
-        assert_eq!(shard.get(&new_key_a), Some(1));
-        assert_eq!(shard.get(&new_key_b), Some(2));
+        assert_eq!(shard.get(&new_key_a).map(Value::from), Some(num(1)));
+        assert_eq!(shard.get(&new_key_b).map(Value::from), Some(num(2)));
         assert_eq!(shard.stats().keys, 2);
     }
 
@@ -309,8 +328,8 @@ mod tests {
     fn revert_updated_entry_with_no_previous_value_removes_key() {
         let shard = RawTableShard::new(3, 4);
         let key = [6u8; 8];
-        shard.apply(&[shard_op(key, 55)]);
-        assert_eq!(shard.get(&key), Some(55));
+        shard.apply(&[shard_op(key, num(55))]);
+        assert_eq!(shard.get(&key).map(Value::from), Some(num(55)));
 
         let undo = ShardUndo {
             shard_index: 3,

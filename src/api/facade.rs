@@ -25,7 +25,7 @@ pub trait StoreFacade: Send + Sync {
     /// # Arguments
     ///
     /// * `block_height` - Must be strictly greater than the current block height
-    /// * `operations` - Vector of set operations (`value == 0` removes the key)
+    /// * `operations` - Vector of set operations (`value.is_delete()` removes the key)
     ///
     /// # Errors
     ///
@@ -37,7 +37,7 @@ pub trait StoreFacade: Send + Sync {
     /// use rollblock::types::Operation;
     /// let op = Operation {
     ///     key: [1, 2, 3, 4, 5, 6, 7, 8],
-    ///     value: 42,
+    ///     value: 42.into(),
     /// };
     /// store.set(1, vec![op])?;
     /// ```
@@ -68,18 +68,18 @@ pub trait StoreFacade: Send + Sync {
     ///
     /// # Returns
     ///
-    /// * `Ok(value)` where `value > 0` if the key exists
-    /// * `Ok(0)` if the key does not exist
+    /// * `Ok(value)` where `!value.is_delete()` if the key exists
+    /// * `Ok(Value::empty())` if the key does not exist
     ///
     /// # Examples
     ///
     /// ```ignore
     /// let key = [1, 2, 3, 4, 5, 6, 7, 8];
     /// let value = store.get(key)?;
-    /// if value == 0 {
+    /// if value.is_delete() {
     ///     println!("Key not found");
     /// } else {
-    ///     println!("Value: {}", value);
+    ///     println!("Value bytes: {:?}", value.as_slice());
     /// }
     /// ```
     fn get(&self, key: Key) -> StoreResult<Value>;
@@ -87,7 +87,7 @@ pub trait StoreFacade: Send + Sync {
     /// Retrieves multiple values in a single call.
     ///
     /// Keys are returned in the same order they were provided. Missing keys
-    /// are represented as zeroes in the returned vector.
+    /// are represented by `Value::empty()` in the returned vector.
     fn multi_get(&self, keys: &[Key]) -> StoreResult<Vec<Value>>;
 
     /// Flushes in-memory state and closes the store gracefully.

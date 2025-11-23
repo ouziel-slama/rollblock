@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         100,
         vec![Operation {
             key: alice,
-            value: 1000,
+            value: 1000.into(),
         }],
     )?;
 
@@ -46,11 +46,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![
             Operation {
                 key: alice,
-                value: 800, // Alice: 1000 - 200
+                value: 800.into(), // Alice: 1000 - 200
             },
             Operation {
                 key: bob,
-                value: 200, // Bob: +200
+                value: 200.into(), // Bob: +200
             },
         ],
     )?;
@@ -63,11 +63,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![
             Operation {
                 key: bob,
-                value: 150, // Bob: 200 - 50
+                value: 150.into(), // Bob: 200 - 50
             },
             Operation {
                 key: charlie,
-                value: 50, // Charlie: +50
+                value: 50.into(), // Charlie: +50
             },
         ],
     )?;
@@ -94,11 +94,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![
             Operation {
                 key: alice,
-                value: 700, // Alice: 1000 - 300
+                value: 700.into(), // Alice: 1000 - 300
             },
             Operation {
                 key: david,
-                value: 300, // David: +300
+                value: 300.into(), // David: +300
             },
         ],
     )?;
@@ -120,11 +120,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![
             Operation {
                 key: david,
-                value: 200, // David: 300 - 100
+                value: 200.into(), // David: 300 - 100
             },
             Operation {
                 key: eve,
-                value: 100, // Eve: +100
+                value: 100.into(), // Eve: +100
             },
         ],
     )?;

@@ -51,7 +51,13 @@ fn active_handle_blocks_second_open_even_for_reads() {
 
     let writer = MhinStoreFacade::new(config.clone()).expect("initial writer");
     writer
-        .set(1, vec![Operation { key, value: 11 }])
+        .set(
+            1,
+            vec![Operation {
+                key,
+                value: 11.into(),
+            }],
+        )
         .expect("write should succeed");
     assert_eq!(writer.get(key).unwrap(), 11);
 

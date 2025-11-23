@@ -114,4 +114,7 @@ pub enum MhinStoreError {
 
     #[error("remote server task failed: {reason}")]
     RemoteServerTaskFailure { reason: String },
+
+    #[error("value payload of {actual} bytes exceeds the {max}-byte limit")]
+    ValueTooLarge { actual: usize, max: usize },
 }

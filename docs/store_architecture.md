@@ -19,7 +19,7 @@ Each layer only depends on the ones below it, which keeps rebuild surfaces small
 Single entry point for users. Implements the `StoreFacade` trait with core methods:
 - `set(block_height, operations)` - applies a block of mutations
 - `rollback(block_height)`
-- `get(key) -> Value` (returns `0` when the key is missing)
+- `get(key) -> Value` (returns `Value::empty()` when the key is missing)
 
 Delegates everything to the `BlockOrchestrator`.
 
@@ -57,6 +57,15 @@ magic(4) | version(2) | reserved(2) | block_height(8) |
 entry_count(4) | compressed_len(8) | uncompressed_len(8) | checksum(4)
 ```
 
+Each payload now encodes operations as a contiguous stream of records:
+
+```
+[key(8)][len(u16)][value bytes ...]
+```
+
+- `len` is the number of value bytes (0 represents a delete) and is capped at 65,535.
+- `entry_count` tracks how many operations were recorded in the block, providing a quick sanity check before replay.
+
 ### 6. Metadata Store (`storage/metadata/`)
 Metadata management via LMDB:
 - `metadata.rs`: defines the `MetadataStore` trait plus `ShardLayout`
@@ -72,6 +81,16 @@ Complete state backup:
 - `reader.rs`: mmap-based restore path with validation
 - `gc.rs`: listing, pruning and cleanup helpers shared by the runtime
 - `snapshot.rs`: `Snapshotter` trait + `MmapSnapshotter` that composes the pieces
+
+Each shard section stores:
+
+```
+[entry_count(u64)]
+  repeat entry_count times:
+    [key(8)][len(u16)][value bytes ...]
+```
+
+`len` follows the same 65,535-byte limit as the journal format, ensuring shards never persist values that exceed protocol constraints.
 
 ## Data Flows
 
@@ -90,7 +109,7 @@ User → Facade.set(block_height, ops)
 **Key features**:
 - `block_height` is provided by the caller and must be strictly greater than the current height
 - Empty blocks support: if `ops` is empty, only `current_block` is updated
-- Zero-value operations are treated as deletes before persistence; non-zero values are stored verbatim
+- Empty-value operations are treated as deletes before persistence; non-empty values are stored verbatim
 
 On error at any step after commit:
 - `StateEngine.revert(block_height, undo)` is called automatically
@@ -118,7 +137,7 @@ User → Facade.get(key)
     → StateEngine.lookup(key)
       → shard = select_shard(hash(key))
       → shard.get(key)
-    ← Value (0 when the key is absent)
+    ← Value (empty when the key is absent)
 ```
 
 ## Guarantees
@@ -142,21 +161,21 @@ User → Facade.get(key)
 ## Core Types
 
 ```rust
-Key = [u8; 8]              // Fixed 8-byte hash
-Value = u64                // 64-bit integer
-BlockId = u64              // Block height (user-controlled)
+Key = [u8; 8]                  // Fixed 8-byte hash
+Value = Vec<u8>                // Up to 65,535 bytes; empty => delete
+BlockId = u64                  // Block height (user-controlled)
 
-Operation {                // User operation
+Operation {                    // User operation
   key: Key
-  value: Value             // value == 0 deletes the key
+  value: Value                 // empty payload deletes the key
 }
 
-BlockDelta {               // Execution plan
+BlockDelta {                   // Execution plan
   block_height: BlockId
   shards: Vec<ShardDelta>
 }
 
-BlockUndo {                // Rollback information
+BlockUndo {                    // Rollback information
   block_height: BlockId
   shard_undos: Vec<ShardUndo>
 }

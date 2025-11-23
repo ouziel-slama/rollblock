@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::error::{MhinStoreError, StoreResult};
 use crate::state_shard::StateShard;
 use crate::storage::fs::sync_directory;
-use crate::types::{BlockId, Key, Value};
+use crate::types::{BlockId, Key, ValueBuf, MAX_VALUE_BYTES};
 
 use super::format::{checksum_from_reader, encode_header, SNAPSHOT_HEADER_SIZE_V2};
 use super::gc::snapshot_path;
@@ -50,10 +50,11 @@ pub(super) fn write_snapshot(
         writer.write_all(&0u64.to_le_bytes())?;
 
         let mut count: u64 = 0;
+        let mut section_bytes: u64 = 8; // entry count prefix
         let mut write_result: StoreResult<()> = Ok(());
 
         {
-            let mut sink = |key: Key, value: Value| {
+            let mut sink = |key: Key, value: ValueBuf| {
                 if write_result.is_err() {
                     return;
                 }
@@ -63,10 +64,49 @@ pub(super) fn write_snapshot(
                     return;
                 }
 
-                if let Err(err) = writer.write_all(&value.to_le_bytes()) {
+                let value_bytes = value.as_slice();
+                if value_bytes.len() > MAX_VALUE_BYTES {
+                    write_result = Err(MhinStoreError::SnapshotCorrupted {
+                        path: tmp_path.clone(),
+                        reason: format!(
+                            "value length {} exceeds MAX_VALUE_BYTES",
+                            value_bytes.len()
+                        ),
+                    });
+                    return;
+                }
+
+                let len_bytes = (value_bytes.len() as u16).to_le_bytes();
+                if let Err(err) = writer.write_all(&len_bytes) {
                     write_result = Err(err.into());
                     return;
                 }
+
+                if let Err(err) = writer.write_all(value_bytes) {
+                    write_result = Err(err.into());
+                    return;
+                }
+
+                let overflow_error = || MhinStoreError::SnapshotCorrupted {
+                    path: tmp_path.clone(),
+                    reason: "snapshot size overflow while writing shard data".to_string(),
+                };
+
+                let entry_bytes = match (8u64 + 2u64).checked_add(value_bytes.len() as u64) {
+                    Some(len) => len,
+                    None => {
+                        write_result = Err(overflow_error());
+                        return;
+                    }
+                };
+
+                section_bytes = match section_bytes.checked_add(entry_bytes) {
+                    Some(total) => total,
+                    None => {
+                        write_result = Err(overflow_error());
+                        return;
+                    }
+                };
 
                 match count.checked_add(1) {
                     Some(next) => {
@@ -86,17 +126,7 @@ pub(super) fn write_snapshot(
 
         write_result?;
 
-        let section_size = 8u64
-            .checked_add(count.checked_mul(16).ok_or_else(|| {
-                MhinStoreError::SnapshotCorrupted {
-                    path: tmp_path.clone(),
-                    reason: "snapshot size overflow while streaming shard data".to_string(),
-                }
-            })?)
-            .ok_or_else(|| MhinStoreError::SnapshotCorrupted {
-                path: tmp_path.clone(),
-                reason: "snapshot size overflow while streaming shard data".to_string(),
-            })?;
+        let section_size = section_bytes;
 
         current_offset = current_offset.checked_add(section_size).ok_or_else(|| {
             MhinStoreError::SnapshotCorrupted {

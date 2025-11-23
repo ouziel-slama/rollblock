@@ -8,6 +8,13 @@ use rollblock::net::BasicAuthConfig;
 use rollblock::types::Operation;
 use rollblock::{MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade};
 
+fn bytes_to_u64_le(bytes: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    let len = bytes.len().min(buf.len());
+    buf[..len].copy_from_slice(&bytes[..len]);
+    u64::from_le_bytes(buf)
+}
+
 fn workspace_tmp() -> PathBuf {
     let path = std::env::current_dir().unwrap().join("target/testdata");
     std::fs::create_dir_all(&path).unwrap();
@@ -56,11 +63,11 @@ fn network_round_trip_tls_auto_server() {
             vec![
                 Operation {
                     key: key_a,
-                    value: 42,
+                    value: 42.into(),
                 },
                 Operation {
                     key: key_b,
-                    value: 7,
+                    value: 7.into(),
                 },
             ],
         )
@@ -74,8 +81,9 @@ fn network_round_trip_tls_auto_server() {
     let batch = client.get(&[key_a, key_b]).unwrap();
     client.close().unwrap();
 
-    assert_eq!(single, 42);
-    assert_eq!(batch, vec![42, 7]);
+    assert_eq!(bytes_to_u64_le(&single), 42);
+    let numeric: Vec<_> = batch.into_iter().map(|v| bytes_to_u64_le(&v)).collect();
+    assert_eq!(numeric, vec![42, 7]);
     store.close().unwrap();
 }
 
@@ -97,7 +105,15 @@ fn network_rejects_bad_credentials() {
 
     let config = StoreConfig::new(&data_dir, 2, 16, 1, false).with_remote_server(settings);
     let store = MhinStoreFacade::new(config).unwrap();
-    store.set(1, vec![Operation { key, value: 99 }]).unwrap();
+    store
+        .set(
+            1,
+            vec![Operation {
+                key,
+                value: 99.into(),
+            }],
+        )
+        .unwrap();
 
     let addr = format!("127.0.0.1:{port}");
     let client_config = ClientConfig::new("localhost", cert_path.clone(), bad_auth)
@@ -128,7 +144,15 @@ fn network_round_trip_without_tls() {
 
     let config = StoreConfig::new(&data_dir, 2, 32, 1, false).with_remote_server(settings);
     let store = MhinStoreFacade::new(config).unwrap();
-    store.set(1, vec![Operation { key, value: 123 }]).unwrap();
+    store
+        .set(
+            1,
+            vec![Operation {
+                key,
+                value: 123.into(),
+            }],
+        )
+        .unwrap();
 
     let addr = format!("127.0.0.1:{port}");
     let client_config =
@@ -137,7 +161,7 @@ fn network_round_trip_without_tls() {
     let value = client.get_one(key).unwrap();
     client.close().unwrap();
 
-    assert_eq!(value, 123);
+    assert_eq!(bytes_to_u64_le(&value), 123);
     store.close().unwrap();
 }
 
@@ -154,7 +178,15 @@ fn default_plaintext_server_uses_proto_credentials() {
 
     let config = StoreConfig::new(&data_dir, 2, 16, 1, false).with_remote_server(settings);
     let store = MhinStoreFacade::new(config).unwrap();
-    store.set(1, vec![Operation { key, value: 77 }]).unwrap();
+    store
+        .set(
+            1,
+            vec![Operation {
+                key,
+                value: 77.into(),
+            }],
+        )
+        .unwrap();
 
     let addr = format!("127.0.0.1:{port}");
     let client_config = ClientConfig::without_tls(BasicAuthConfig::new("proto", "proto"))
@@ -163,7 +195,7 @@ fn default_plaintext_server_uses_proto_credentials() {
     let value = client.get_one(key).unwrap();
     client.close().unwrap();
 
-    assert_eq!(value, 77);
+    assert_eq!(bytes_to_u64_le(&value), 77);
 
     let metrics = store.remote_server_metrics().expect("metrics available");
     assert!(metrics.total_connections >= 1);
@@ -191,7 +223,15 @@ fn network_round_trip_default_plaintext_config() {
         .enable_remote_server()
         .expect("default remote server settings exist");
     let store = MhinStoreFacade::new(config).unwrap();
-    store.set(1, vec![Operation { key, value: 11 }]).unwrap();
+    store
+        .set(
+            1,
+            vec![Operation {
+                key,
+                value: 11.into(),
+            }],
+        )
+        .unwrap();
 
     let client_config = ClientConfig::without_tls(BasicAuthConfig::new("proto", "proto"))
         .with_timeout(Duration::from_secs(2));
@@ -199,7 +239,7 @@ fn network_round_trip_default_plaintext_config() {
     let value = client.get_one(key).unwrap();
     client.close().unwrap();
 
-    assert_eq!(value, 11);
+    assert_eq!(bytes_to_u64_le(&value), 11);
     store.close().unwrap();
 }
 

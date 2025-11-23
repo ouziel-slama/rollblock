@@ -16,7 +16,7 @@ A super-fast, rollbackable block-oriented key-value store.
 - zstd-compressed undo journal entries protected by Blake3 checksums.
 - Memory-mapped snapshots with checksum validation for fast restarts.
 - Configurable sharding with optional Rayon-based parallel execution.
-- Zero-as-delete semantics and a block-staging facade for complex workflows.
+- Empty-value-as-delete semantics and a block-staging facade for complex workflows.
 - Built-in metrics, health reporting, and structured tracing hooks.
 - Authenticated remote server (TLS optional) and a zero-allocation Rust client for remote queries.
 
@@ -35,8 +35,8 @@ See `docs/block_benchmark.md` for the complete methodology, hardware specs, and 
 ## Data Model
 
 - `Key = [u8; 8]`: fixed-size keys (hash higher-level identifiers if needed).
-- `Value = u64`: 64-bit values stored per key.
-- `Operation` batches carry `key` and `value`; setting `value = 0` removes a key.
+- `Value = Vec<u8>`: payloads up to 65,535 bytes per key (an empty vector marks a delete).
+- `Operation` batches carry `key` and `value`; `value.is_delete()` removes a key.
 - `BlockId = u64`: block heights must strictly increase; each block is applied atomically.
 
 ## Installation
@@ -52,7 +52,7 @@ rollblock = "0.2"
 
 ```rust
 use rollblock::{MhinStoreFacade, StoreConfig, StoreResult};
-use rollblock::types::Operation;
+use rollblock::types::{Operation, Value};
 
 fn main() -> StoreResult<()> {
     let config = StoreConfig::new("./data/basic", 4, 1000, 1, false);
@@ -63,18 +63,23 @@ fn main() -> StoreResult<()> {
         1,
         vec![Operation {
             key,
-            value: 100,
+            value: Value::from_slice(b"balance=100"),
         }],
     )?;
 
     let value = store.get(key)?;
-    if value > 0 {
-        println!("Value at block 1: {value}");
+    if value.is_delete() {
+        println!("Key not found");
+    } else {
+        println!("Value bytes: {:?}", value.as_slice());
     }
 
     // Prefer multi_get when requesting more than one key.
     let batch = store.multi_get(&[key, [2u8; 8]])?;
-    println!("Batch read returned {:?}", batch);
+    println!(
+        "Batch read lengths: {:?}",
+        batch.iter().map(Value::len).collect::<Vec<_>>()
+    );
 
     store.rollback(0)?;
     store.close()?;
@@ -82,7 +87,7 @@ fn main() -> StoreResult<()> {
 }
 ```
 
-`multi_get` shares the same zero-fill semantics as `get` but amortizes lock
+`multi_get` shares the same empty-value semantics as `get` but amortizes lock
 contention and remote round-trips. Prefer it whenever you have more than one key.
 
 ⚠️ Remote access is opt-in. Call `.enable_remote_server()` (or
@@ -96,7 +101,7 @@ Use `MhinStoreBlockFacade` to stage operations while exposing intermediate reads
 
 ```rust
 use rollblock::{MhinStoreBlockFacade, StoreConfig, StoreResult};
-use rollblock::types::Operation;
+use rollblock::types::{Operation, Value};
 
 fn staged_block() -> StoreResult<()> {
     let facade = MhinStoreBlockFacade::new(StoreConfig::new("./data/staged", 4, 1000, 1, false))?;
@@ -104,10 +109,13 @@ fn staged_block() -> StoreResult<()> {
     facade.start_block(42)?;
     facade.set(Operation {
         key: [9u8; 8],
-        value: 77,
+        value: Value::from_slice(b"staged"),
     })?;
-    assert_eq!(facade.get([9u8; 8])?, 77);
-    assert_eq!(facade.multi_get(&[[9u8; 8], [1u8; 8]])?, vec![77, 0]);
+    let read = facade.get([9u8; 8])?;
+    assert_eq!(read.as_slice(), b"staged");
+    let batch = facade.multi_get(&[[9u8; 8], [1u8; 8]])?;
+    assert_eq!(batch[0].as_slice(), b"staged");
+    assert!(batch[1].is_delete());
     facade.end_block()?;
     Ok(())
 }
@@ -196,7 +204,7 @@ environments or higher when the remote server is the primary workload.
 
 - Requests start with a single `u8` header containing the number of keys (`1‥=255`).
 - Payload = `N × 8` bytes (`[Key; N]`): keys are raw `[u8; 8]`. Bytes are not interpreted—hash or encode upstream IDs into 8 bytes.
-- Responses = `N × 8` bytes (`[u64; N]`) encoded little-endian (`Value == 0` means “absent”).
+- Responses stream `N` records of `[len(u16)][value bytes]`. `len` is the number of bytes for that key (`0` means “missing”) and cannot exceed 65,535. The entire response must fit in `N × (2 + len)` bytes, so clients must read per-record.
 - Error handling: the server replies with a single byte code and immediately closes the connection. Current codes are `1 = invalid header`, `2 = invalid payload`, `3 = store failure`, `4 = unauthorized`, `5 = timeout`.
 
 > **Example:** sending `0x02` as the header means “two keys are about to follow”. Exactly `2 × 8 = 16` payload bytes must be transmitted before the server can respond.
@@ -250,7 +258,17 @@ let config = ClientConfig::new("my-server.local", "./tls/root-ca.pem", auth)
 
 let mut client = RemoteStoreClient::connect("my-server.local:9443", config)?;
 let balance = client.get_one([0u8; 8])?;
+if balance.is_empty() {
+    println!("Balance not set");
+} else {
+    let mut buf = [0u8; 8];
+    buf[..balance.len()].copy_from_slice(&balance);
+    println!("Balance = {}", u64::from_le_bytes(buf));
+}
 let batch = client.get(&[[0u8; 8], [1u8; 8]])?;
+for (idx, value) in batch.iter().enumerate() {
+    println!("Key #{idx} returned {} bytes", value.len());
+}
 client.close()?;
 ```
 
@@ -259,9 +277,16 @@ client.close()?;
 let auth = BasicAuthConfig::new("proto", "proto"); // matches the defaults
 let config = ClientConfig::without_tls(auth).with_timeout(Duration::from_secs(2));
 let mut client = RemoteStoreClient::connect("127.0.0.1:9444", config)?;
+let value = client.get_one([0u8; 8])?;
+if value.is_empty() {
+    println!("Key missing");
+} else {
+    println!("Value len = {}", value.len());
+}
 ```
 
 The client automatically reuses request/response buffers, performs Basic Auth, and enforces an optional read/write timeout via `set_{read,write}_timeout`.
+Both `get` and `get_one` return raw `Vec<u8>` payloads where an empty vector represents a missing key.
 
 ### Manual Control (Optional)
 

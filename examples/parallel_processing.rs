@@ -5,7 +5,7 @@
 //!
 //! Run with: cargo run --example parallel_processing --release
 
-use rollblock::types::Operation;
+use rollblock::types::{Operation, Value};
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
 use std::time::Instant;
 
@@ -36,7 +36,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut operations = Vec::with_capacity(100_000);
     for i in 0..100_000u64 {
         let key = i.to_le_bytes();
-        operations.push(Operation { key, value: i });
+        operations.push(Operation {
+            key,
+            value: i.into(),
+        });
     }
 
     store.set(1, operations)?;
@@ -55,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut found_count = 0;
     for i in (0..10_000u64).step_by(10) {
         let key = i.to_le_bytes();
-        if store.get(key)? > 0 {
+        if store.get(key)?.is_set() {
             found_count += 1;
         }
     }
@@ -77,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let key = i.to_le_bytes();
         operations.push(Operation {
             key,
-            value: i * 10, // Multiply value by 10
+            value: (i * 10).into(), // Multiply value by 10
         });
     }
 
@@ -97,7 +100,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut operations = Vec::with_capacity(30_000);
     for i in (0..60_000u64).step_by(2) {
         let key = i.to_le_bytes();
-        operations.push(Operation { key, value: 0 });
+        operations.push(Operation {
+            key,
+            value: Value::empty(),
+        });
     }
 
     store.set(3, operations)?;
@@ -124,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sample_keys = 0;
     for i in (0..100_000u64).step_by(10_000) {
         let key = i.to_le_bytes();
-        if store.get(key)? > 0 {
+        if store.get(key)?.is_set() {
             sample_keys += 1;
         }
     }

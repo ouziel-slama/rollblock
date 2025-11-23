@@ -87,11 +87,11 @@ Choose parameters based on your workload:
 - `true`: Enables zstd compression to reduce disk usage; increases CPU usage
 - Toggle per environment depending on available I/O vs CPU budgets
 
-### 5. Zero-value semantics
+### 5. Empty-value semantics
 
-- `Operation { value: 0 }` removes the key if it exists.
-- `store.get(key)` returns `0` when the key is absent.
-- Use non-zero values for persisted data; zero acts as a tombstone.
+- `Operation { value: Value::empty() }` removes the key if it exists.
+- `store.get(key)` returns `Value::empty()` (an empty `Vec<u8>`) when the key is absent.
+- Use non-empty payloads for persisted data; the empty vector acts as a tombstone.
 
 ### Example: 80M Active Keys (Production)
 
@@ -161,11 +161,11 @@ requests, failures, and average latency.
 use rollblock::types::Operation;
 
 let key = [1, 2, 3, 4, 5, 6, 7, 8];
-let value = 42;
+let value = 42u64;
 
 let op = Operation {
     key,
-    value: value,
+    value: value.into(),
 };
 
 store.set(1, vec![op])?;
@@ -176,7 +176,7 @@ store.set(1, vec![op])?;
 ```rust
 let op = Operation {
     key,
-    value: 100,
+    value: 100u64.into(),
 };
 
 store.set(2, vec![op])?;
@@ -185,9 +185,11 @@ store.set(2, vec![op])?;
 ### DELETE
 
 ```rust
+use rollblock::types::Value;
+
 let op = Operation {
     key,
-    value: 0, // value not required for delete
+    value: Value::empty(), // empty bytes remove the key
 };
 
 store.set(3, vec![op])?;
@@ -197,10 +199,10 @@ store.set(3, vec![op])?;
 
 ```rust
 let value = store.get(key)?;
-if value == 0 {
+if value.is_delete() {
     println!("Key not found");
 } else {
-    println!("Value: {}", value);
+    println!("Value bytes: {:?}", value.as_slice());
 }
 ```
 
@@ -209,11 +211,15 @@ if value == 0 {
 ```rust
 let keys = [[1u8; 8], [2u8; 8], [3u8; 8]];
 let values = store.multi_get(&keys)?;
-assert_eq!(values, vec![10, 0, 27]);
+let numbers: Vec<_> = values
+    .iter()
+    .map(|value| value.to_u64().unwrap_or(0))
+    .collect();
+assert_eq!(numbers, vec![10, 0, 27]);
 ```
 
 `multi_get` returns values in the same order as the provided keys and substitutes
-`0` for missing rows. Internally it only acquires the read gate once, so prefer
+`Value::empty()` for missing rows. Internally it only acquires the read gate once, so prefer
 it for any request that touches more than one key.
 
 ## Block-Staged Updates
@@ -231,15 +237,17 @@ let block_store = MhinStoreBlockFacade::new(config)?;
 block_store.start_block(100)?;
 block_store.set(Operation {
     key: [1, 2, 3, 4, 5, 6, 7, 8],
-    value: 42,
+    value: 42u64.into(),
 })?;
 
 // Intermediate reads reflect staged operations
 assert_eq!(block_store.get([1, 2, 3, 4, 5, 6, 7, 8])?, 42);
-assert_eq!(
-    block_store.multi_get(&[[1, 2, 3, 4, 5, 6, 7, 8], [9, 9, 9, 9, 9, 9, 9, 9]])?,
-    vec![42, 0]
-);
+let staged_hits = block_store.multi_get(&[
+    [1, 2, 3, 4, 5, 6, 7, 8],
+    [9, 9, 9, 9, 9, 9, 9, 9],
+])?;
+assert_eq!(staged_hits[0].to_u64(), Some(42));
+assert!(staged_hits[1].is_delete());
 
 // Commit the staged block
 block_store.end_block()?;
@@ -266,22 +274,24 @@ even while a block is in progress.
 ## Batch Operations
 
 ```rust
+use rollblock::types::{Operation, Value};
+
 let operations = vec![
     Operation {
         key: [1, 0, 0, 0, 0, 0, 0, 0],
-        value: 10,
+        value: 10u64.into(),
     },
     Operation {
         key: [2, 0, 0, 0, 0, 0, 0, 0],
-        value: 20,
+        value: 20u64.into(),
     },
     Operation {
         key: [1, 0, 0, 0, 0, 0, 0, 0],
-        value: 15,
+        value: 15u64.into(),
     },
     Operation {
         key: [2, 0, 0, 0, 0, 0, 0, 0],
-        value: 0,
+        value: Value::empty(),
     },
 ];
 
@@ -309,7 +319,7 @@ store.rollback(0)?; // Undo all operations
 The store supports empty blocks (gaps in IDs):
 
 ```rust
-use rollblock::types::Operation;
+use rollblock::types::{Operation, Value};
 
 let key_a = [0xAA; 8];
 let key_b = [0xBB; 8];
@@ -319,7 +329,7 @@ store.set(
     100,
     vec![Operation {
         key: key_a,
-        value: 7,
+        value: 7u64.into(),
     }],
 )?;
 
@@ -328,7 +338,7 @@ store.set(
     105,
     vec![Operation {
         key: key_b,
-        value: 9,
+        value: 9u64.into(),
     }],
 )?;
 
@@ -340,7 +350,7 @@ store.rollback(102)?;
 // State: key_a present, key_b absent (block 105 undone)
 ```
 
-## Zero Value Deletes (Default)
+## Empty Value Deletes (Default)
 
 Zero values are always interpreted as delete operations. No additional configuration is required.
 
@@ -358,35 +368,35 @@ let config = StoreConfig::new(
 let store = MhinStoreFacade::new(config)?;
 ```
 
-### Use Case: Zero-As-Delete Streams
+### Use Case: Empty-Value Streams
 
 ```rust
-use rollblock::types::Operation;
+use rollblock::types::{Operation, Value};
 
 let key_a = [1u8; 8];
 
 // Ingest upstream mutation
 let initial_set = Operation {
     key: key_a,
-    value: 10,
+    value: 10u64.into(),
 };
 store.set(1, vec![initial_set])?;
 
-// Upstream emits a "set to zero" to signal deletion
+// Upstream emits an empty value to signal deletion
 let delete_marker = Operation {
     key: key_a,
-    value: 0,
+    value: Value::empty(),
 };
 store.set(2, vec![delete_marker])?;
 
-assert_eq!(store.get(key_a)?, 0); // treated as delete
+assert!(store.get(key_a)?.is_delete());
 ```
 
 ### Detailed Behavior
 
-- Setting `value = 0` removes the key; non-zero values are persisted as data.
+- Setting `Value::empty()` removes the key; non-empty values are persisted as data.
 - The delete translation happens before journaling, so checkpoints and rollbacks observe delete semantics.
-- Metrics split zero-based deletes from non-zero sets for observability.
+- Metrics split empty-value deletes from non-empty sets for observability.
 
 ## Understanding Block Heights
 
@@ -500,20 +510,20 @@ fn main() -> StoreResult<()> {
     // SET (new key)
     store.set(1, vec![Operation {
         key,
-        value: 100,
+        value: 100u64.into(),
     }])?;
     println!("Block 1: Set key to 100");
     
     // SET (existing key)
     store.set(2, vec![Operation {
         key,
-        value: 200,
+        value: 200u64.into(),
     }])?;
     println!("Block 2: Updated key to 200");
     
     // GET
     let value = store.get(key)?;
-    if value == 0 {
+    if value.is_delete() {
         println!("Key not found");
     } else {
         println!("Current value: {}", value); // 200
@@ -522,7 +532,7 @@ fn main() -> StoreResult<()> {
     // ROLLBACK
     store.rollback(1)?;
     let value = store.get(key)?;
-    if value == 0 {
+    if value.is_delete() {
         println!("Key not found");
     } else {
         println!("Value after rollback: {}", value); // 100

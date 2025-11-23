@@ -304,6 +304,9 @@ impl MhinStoreFacade {
 
 impl StoreFacade for MhinStoreFacade {
     fn set(&self, block_height: BlockId, operations: Vec<Operation>) -> StoreResult<()> {
+        for op in operations.iter() {
+            op.value.ensure_within_limit()?;
+        }
         self.orchestrator.apply_operations(block_height, operations)
     }
 

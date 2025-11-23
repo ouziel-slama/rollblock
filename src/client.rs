@@ -10,10 +10,10 @@ use rustls::{ClientConfig as TlsClientConfig, ClientConnection, RootCertStore, S
 use rustls_pemfile::certs;
 
 use crate::net::BasicAuthConfig;
-use crate::types::Key;
+use crate::types::{Key, MAX_VALUE_BYTES};
 
 const KEY_WIDTH: usize = 8;
-const VALUE_WIDTH: usize = 8;
+const VALUE_LEN_WIDTH: usize = 2;
 const MAX_KEYS_PER_REQUEST: usize = 255;
 const AUTH_READY: u8 = 0;
 
@@ -130,12 +130,15 @@ impl RemoteStoreClient {
         Ok(Self {
             stream,
             request_buf: Vec::with_capacity(1 + KEY_WIDTH * MAX_KEYS_PER_REQUEST),
-            response_buf: Vec::with_capacity(VALUE_WIDTH * MAX_KEYS_PER_REQUEST),
+            response_buf: Vec::with_capacity(1024),
         })
     }
 
     /// Executes a batch read for the provided keys.
-    pub fn get(&mut self, keys: &[Key]) -> Result<Vec<u64>, ClientError> {
+    ///
+    /// Returned values preserve the remote payload verbatim. Missing keys are
+    /// encoded as empty byte vectors.
+    pub fn get(&mut self, keys: &[Key]) -> Result<Vec<Vec<u8>>, ClientError> {
         if keys.is_empty() {
             return Err(ClientError::InvalidRequest(
                 "at least one key must be provided",
@@ -156,50 +159,68 @@ impl RemoteStoreClient {
         self.stream.write_all(&self.request_buf).map_err(map_io)?;
         self.stream.flush().map_err(map_io)?;
 
-        let expected_bytes = keys.len() * VALUE_WIDTH;
-        if self.response_buf.len() < expected_bytes {
-            self.response_buf.resize(expected_bytes, 0);
-        }
-
-        let mut read = 0;
-        while read < expected_bytes {
-            let n = self
-                .stream
-                .read(&mut self.response_buf[read..expected_bytes])
-                .map_err(map_io)?;
-            if n == 0 {
-                if read == 1 {
-                    let code = self.response_buf[0];
-                    return Err(ClientError::Server { code });
-                }
-                return Err(ClientError::ConnectionClosed {
-                    received: read,
-                    expected: expected_bytes,
-                });
-            }
-            read += n;
-        }
-
         let mut values = Vec::with_capacity(keys.len());
-        for chunk in self.response_buf[..expected_bytes].chunks_exact(VALUE_WIDTH) {
-            let mut buf = [0u8; VALUE_WIDTH];
-            buf.copy_from_slice(chunk);
-            values.push(u64::from_le_bytes(buf));
+        let mut len_buf = [0u8; VALUE_LEN_WIDTH];
+        for (index, _) in keys.iter().enumerate() {
+            read_response_chunk(&mut self.stream, &mut len_buf, index == 0)?;
+            let value_len = u16::from_le_bytes(len_buf) as usize;
+            if value_len > MAX_VALUE_BYTES {
+                return Err(ClientError::InvalidResponse(
+                    "value length exceeds MAX_VALUE_BYTES",
+                ));
+            }
+            if self.response_buf.len() < value_len {
+                self.response_buf.resize(value_len, 0);
+            }
+            if value_len > 0 {
+                let buffer = &mut self.response_buf[..value_len];
+                read_response_chunk(&mut self.stream, buffer, false)?;
+            }
+            values.push(self.response_buf[..value_len].to_vec());
         }
 
         Ok(values)
     }
 
     /// Reads a single key from the remote store.
-    pub fn get_one(&mut self, key: Key) -> Result<u64, ClientError> {
+    ///
+    /// Missing keys return an empty vector.
+    pub fn get_one(&mut self, key: Key) -> Result<Vec<u8>, ClientError> {
         let values = self.get(std::slice::from_ref(&key))?;
-        Ok(values[0])
+        Ok(values.into_iter().next().unwrap_or_default())
     }
 
     /// Closes the TLS session gracefully.
     pub fn close(self) -> Result<(), ClientError> {
         self.stream.close().map_err(map_io)
     }
+}
+
+fn read_response_chunk(
+    stream: &mut ClientStream,
+    buffer: &mut [u8],
+    allow_error_code: bool,
+) -> Result<(), ClientError> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
+
+    let mut read = 0;
+    while read < buffer.len() {
+        let n = stream.read(&mut buffer[read..]).map_err(map_io)?;
+        if n == 0 {
+            if allow_error_code && read == 1 {
+                return Err(ClientError::Server { code: buffer[0] });
+            }
+            return Err(ClientError::ConnectionClosed {
+                received: read,
+                expected: buffer.len(),
+            });
+        }
+        read += n;
+    }
+
+    Ok(())
 }
 
 fn build_tls_client(path: &Path) -> Result<Arc<TlsClientConfig>, ClientError> {
@@ -259,6 +280,8 @@ pub enum ClientError {
     InvalidDnsName(String),
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
+    #[error("invalid response from server: {0}")]
+    InvalidResponse(&'static str),
     #[error("server returned error code {code}")]
     Server { code: u8 },
     #[error("connection closed before response (received {received} of {expected} bytes)")]

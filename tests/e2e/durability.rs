@@ -27,7 +27,14 @@ fn e2e_async_durability_queue() -> StoreResult<()> {
     let key = [0xA1u8; 8];
 
     for block in 1..=4 {
-        apply_block(&store, block, vec![Operation { key, value: block }])?;
+        apply_block(
+            &store,
+            block,
+            vec![Operation {
+                key,
+                value: (block).into(),
+            }],
+        )?;
     }
 
     let mut lag_observed = false;
@@ -72,7 +79,14 @@ fn e2e_async_empty_block_waits_for_persistence() -> StoreResult<()> {
 
     let key = [0xE1u8; 8];
 
-    apply_block(&store, 1, vec![Operation { key, value: 11 }])?;
+    apply_block(
+        &store,
+        1,
+        vec![Operation {
+            key,
+            value: 11.into(),
+        }],
+    )?;
     apply_block(&store, 2, Vec::new())?;
 
     assert_eq!(store.applied_block()?, 2, "empty block should be applied");
@@ -125,7 +139,14 @@ fn e2e_sync_empty_block_crash_helper() -> StoreResult<()> {
 
     let key = [0xF1u8; 8];
 
-    apply_block(&store, 1, vec![Operation { key, value: 55 }])?;
+    apply_block(
+        &store,
+        1,
+        vec![Operation {
+            key,
+            value: 55.into(),
+        }],
+    )?;
     apply_block(&store, 2, Vec::new())?;
     store.ensure_healthy()?;
 
@@ -183,13 +204,27 @@ fn e2e_sync_durability() -> StoreResult<()> {
 
     let key = [0xB1u8; 8];
 
-    apply_block(&store, 1, vec![Operation { key, value: 11 }])?;
+    apply_block(
+        &store,
+        1,
+        vec![Operation {
+            key,
+            value: 11.into(),
+        }],
+    )?;
 
     assert_eq!(store.current_block()?, 1);
     assert_eq!(store.applied_block()?, 1);
     assert_eq!(store.durable_block()?, 1);
 
-    apply_block(&store, 2, vec![Operation { key, value: 22 }])?;
+    apply_block(
+        &store,
+        2,
+        vec![Operation {
+            key,
+            value: 22.into(),
+        }],
+    )?;
 
     assert_eq!(store.current_block()?, 2);
     assert_eq!(store.applied_block()?, 2);
@@ -215,10 +250,24 @@ fn e2e_restart_replays_journal() -> StoreResult<()> {
 
     let key = [0xC1u8; 8];
 
-    apply_block(&store, 1, vec![Operation { key, value: 101 }])?;
+    apply_block(
+        &store,
+        1,
+        vec![Operation {
+            key,
+            value: 101.into(),
+        }],
+    )?;
     wait_for_durable(&store, 1, DEFAULT_TIMEOUT)?;
 
-    apply_block(&store, 2, vec![Operation { key, value: 202 }])?;
+    apply_block(
+        &store,
+        2,
+        vec![Operation {
+            key,
+            value: 202.into(),
+        }],
+    )?;
     wait_for_durable(&store, 2, DEFAULT_TIMEOUT)?;
     store.ensure_healthy()?;
 
@@ -250,10 +299,24 @@ fn e2e_snapshot_refresh() -> StoreResult<()> {
     {
         let store = harness.open()?;
 
-        apply_block(&store, 1, vec![Operation { key, value: 301 }])?;
+        apply_block(
+            &store,
+            1,
+            vec![Operation {
+                key,
+                value: 301.into(),
+            }],
+        )?;
         wait_for_durable(&store, 1, DEFAULT_TIMEOUT)?;
 
-        apply_block(&store, 2, vec![Operation { key, value: 404 }])?;
+        apply_block(
+            &store,
+            2,
+            vec![Operation {
+                key,
+                value: 404.into(),
+            }],
+        )?;
         wait_for_durable(&store, 2, DEFAULT_TIMEOUT)?;
 
         store.ensure_healthy()?;

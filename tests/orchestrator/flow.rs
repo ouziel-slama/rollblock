@@ -9,7 +9,7 @@ use rollblock::error::MhinStoreError;
 use rollblock::orchestrator::{BlockOrchestrator, DefaultBlockOrchestrator};
 use rollblock::state_engine::ShardedStateEngine;
 use rollblock::state_shard::{RawTableShard, StateShard};
-use rollblock::types::{Key, ShardOp, ShardStats, ShardUndo, Value};
+use rollblock::types::{Key, ShardOp, ShardStats, ShardUndo, Value, ValueBuf};
 use rollblock::FileBlockJournal;
 use rollblock::MetadataStore;
 
@@ -54,7 +54,7 @@ impl StateShard for BlockingShard {
         self.inner.revert(undo);
     }
 
-    fn get(&self, key: &Key) -> Option<Value> {
+    fn get(&self, key: &Key) -> Option<ValueBuf> {
         self.inner.get(key)
     }
 
@@ -62,15 +62,15 @@ impl StateShard for BlockingShard {
         self.inner.stats()
     }
 
-    fn export_data(&self) -> Vec<(Key, Value)> {
+    fn export_data(&self) -> Vec<(Key, ValueBuf)> {
         self.inner.export_data()
     }
 
-    fn visit_entries(&self, visitor: &mut dyn FnMut(Key, Value)) {
+    fn visit_entries(&self, visitor: &mut dyn FnMut(Key, ValueBuf)) {
         self.inner.visit_entries(visitor);
     }
 
-    fn import_data(&self, data: Vec<(Key, Value)>) {
+    fn import_data(&self, data: Vec<(Key, ValueBuf)>) {
         self.inner.import_data(data);
     }
 }
@@ -500,7 +500,7 @@ fn block_height_must_be_increasing() {
 }
 
 #[test]
-fn zero_value_sets_delete_keys() {
+fn empty_value_sets_delete_keys() {
     let tmp = tempdir();
     let journal_path = tmp.path().join("journal");
 
@@ -532,7 +532,7 @@ fn zero_value_sets_delete_keys() {
 
     // Update with value 0 should translate to delete
     orchestrator
-        .apply_operations(2, vec![operation(key_a, 0)])
+        .apply_operations(2, vec![operation(key_a, Value::empty())])
         .unwrap();
 
     assert_eq!(orchestrator.fetch(key_a).unwrap(), 0);

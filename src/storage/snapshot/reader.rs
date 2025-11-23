@@ -5,9 +5,12 @@ use memmap2::Mmap;
 
 use crate::error::{MhinStoreError, StoreResult};
 use crate::state_shard::StateShard;
-use crate::types::{BlockId, Key, Value};
+use crate::types::{BlockId, Key, ValueBuf, MAX_VALUE_BYTES};
 
 use super::format::{checksum_to_u64, parse_header};
+
+const KEY_WIDTH: usize = 8;
+const VALUE_LEN_WIDTH: usize = 2;
 
 pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> StoreResult<BlockId> {
     let file = std::fs::File::open(path)?;
@@ -99,15 +102,19 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
             mmap[data_offset + 7],
         ]) as usize;
 
-        let mut shard_entries = Vec::with_capacity(entry_count);
-        let mut entry_pos = data_offset + 8;
+        let entry_section_start = data_offset + 8;
+        let remaining_bytes = mmap.len().saturating_sub(entry_section_start);
+        let max_entries_possible = remaining_bytes / (KEY_WIDTH + VALUE_LEN_WIDTH);
+        let reserve = entry_count.min(max_entries_possible);
+        let mut shard_entries = Vec::with_capacity(reserve);
+        let mut entry_pos = entry_section_start;
 
         for _ in 0..entry_count {
-            if entry_pos + 16 > mmap.len() {
+            if entry_pos + 10 > mmap.len() {
                 return Err(MhinStoreError::SnapshotCorrupted {
                     path: path.to_path_buf(),
                     reason: format!(
-                        "unexpected end of file while reading shard {} entries",
+                        "unexpected end of file while reading shard {} key length",
                         shard_idx
                     ),
                 });
@@ -116,19 +123,34 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
             let mut key = Key::default();
             key.copy_from_slice(&mmap[entry_pos..entry_pos + 8]);
 
-            let value = Value::from_le_bytes([
-                mmap[entry_pos + 8],
-                mmap[entry_pos + 9],
-                mmap[entry_pos + 10],
-                mmap[entry_pos + 11],
-                mmap[entry_pos + 12],
-                mmap[entry_pos + 13],
-                mmap[entry_pos + 14],
-                mmap[entry_pos + 15],
-            ]);
+            let len_offset = entry_pos + 8;
+            let value_len = u16::from_le_bytes([mmap[len_offset], mmap[len_offset + 1]]) as usize;
 
+            if value_len > MAX_VALUE_BYTES {
+                return Err(MhinStoreError::SnapshotCorrupted {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "value length {} exceeds MAX_VALUE_BYTES while reading shard {}",
+                        value_len, shard_idx
+                    ),
+                });
+            }
+
+            entry_pos = len_offset + 2;
+
+            if entry_pos + value_len > mmap.len() {
+                return Err(MhinStoreError::SnapshotCorrupted {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "unexpected end of file while reading shard {} value payload",
+                        shard_idx
+                    ),
+                });
+            }
+
+            let value = ValueBuf::from_slice(&mmap[entry_pos..entry_pos + value_len]);
             shard_entries.push((key, value));
-            entry_pos += 16;
+            entry_pos += value_len;
         }
 
         shard.import_data(shard_entries);

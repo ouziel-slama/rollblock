@@ -1,12 +1,14 @@
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rayon::ThreadPool;
 
 use crate::error::{MhinStoreError, StoreResult};
 use crate::metadata::MetadataStore;
 use crate::state::shard::StateShard;
-use crate::types::{BlockDelta, BlockId, BlockUndo, Key, Operation, StateStats, Value};
+#[cfg(test)]
+use crate::types::Value;
+use crate::types::{BlockDelta, BlockId, BlockUndo, Key, Operation, StateStats, ValueBuf};
 
 mod executor;
 mod hashing;
@@ -27,8 +29,8 @@ pub trait StateEngine: Send + Sync {
         delta: BlockDelta,
     ) -> StoreResult<(StateStats, BlockUndo)>;
     fn revert(&self, block_height: BlockId, undo: BlockUndo) -> StoreResult<()>;
-    fn lookup(&self, key: &Key) -> Option<Value>;
-    fn lookup_many(&self, keys: &[Key]) -> Vec<Option<Value>> {
+    fn lookup(&self, key: &Key) -> Option<ValueBuf>;
+    fn lookup_many(&self, keys: &[Key]) -> Vec<Option<ValueBuf>> {
         keys.iter().map(|key| self.lookup(key)).collect()
     }
     fn snapshot_shards(&self) -> Vec<Arc<dyn StateShard>>;
@@ -45,6 +47,7 @@ where
     M: MetadataStore + 'static,
 {
     shards: Vec<Arc<dyn StateShard>>,
+    lookup_scratch: Vec<Mutex<Vec<Option<ValueBuf>>>>,
     _metadata: PhantomData<Arc<M>>,
     thread_pool: Option<Arc<ThreadPool>>,
 }
@@ -54,8 +57,10 @@ where
     M: MetadataStore + 'static,
 {
     pub fn new(shards: Vec<Arc<dyn StateShard>>, _metadata: Arc<M>) -> Self {
+        let lookup_scratch = Self::build_lookup_scratch(shards.len());
         Self {
             shards,
+            lookup_scratch,
             _metadata: PhantomData,
             thread_pool: None,
         }
@@ -66,8 +71,10 @@ where
         _metadata: Arc<M>,
         thread_pool: Option<Arc<ThreadPool>>,
     ) -> Self {
+        let lookup_scratch = Self::build_lookup_scratch(shards.len());
         Self {
             shards,
+            lookup_scratch,
             _metadata: PhantomData,
             thread_pool,
         }
@@ -75,6 +82,10 @@ where
 
     pub fn shard_count(&self) -> usize {
         self.shards.len()
+    }
+
+    fn build_lookup_scratch(shard_count: usize) -> Vec<Mutex<Vec<Option<ValueBuf>>>> {
+        (0..shard_count).map(|_| Mutex::new(Vec::new())).collect()
     }
 
     fn shard_for_key(&self, key: &Key) -> Option<&Arc<dyn StateShard>> {
@@ -157,7 +168,7 @@ where
         revert_block(&self.shards, self.thread_pool.as_ref(), block_height, undo)
     }
 
-    fn lookup_many(&self, keys: &[Key]) -> Vec<Option<Value>> {
+    fn lookup_many(&self, keys: &[Key]) -> Vec<Option<ValueBuf>> {
         if keys.is_empty() {
             return Vec::new();
         }
@@ -196,11 +207,23 @@ where
                 continue;
             }
 
-            if let Some(shard) = self.shards.get(shard_idx) {
-                let mut shard_out = vec![None; batch.keys.len()];
-                shard.get_many(&batch.keys, &mut shard_out);
-                for (pos, value) in batch.positions.into_iter().zip(shard_out.into_iter()) {
-                    results[pos] = value;
+            if let (Some(shard), Some(scratch_mutex)) = (
+                self.shards.get(shard_idx),
+                self.lookup_scratch.get(shard_idx),
+            ) {
+                let mut scratch = scratch_mutex.lock().unwrap();
+                if scratch.len() < batch.keys.len() {
+                    scratch.resize(batch.keys.len(), None);
+                } else {
+                    for slot in scratch.iter_mut().take(batch.keys.len()) {
+                        *slot = None;
+                    }
+                }
+
+                let slice = &mut scratch[..batch.keys.len()];
+                shard.get_many(&batch.keys, slice);
+                for (pos, slot) in batch.positions.into_iter().zip(slice.iter_mut()) {
+                    results[pos] = slot.take();
                 }
             }
         }
@@ -208,7 +231,7 @@ where
         results
     }
 
-    fn lookup(&self, key: &Key) -> Option<Value> {
+    fn lookup(&self, key: &Key) -> Option<ValueBuf> {
         self.shard_for_key(key).and_then(|shard| shard.get(key))
     }
 
@@ -289,6 +312,26 @@ mod tests {
         ShardOp { key, value }
     }
 
+    fn val(num: u64) -> Value {
+        Value::from(num)
+    }
+
+    fn del() -> Value {
+        Value::empty()
+    }
+
+    fn op_num(key: Key, num: u64) -> Operation {
+        op(key, val(num))
+    }
+
+    fn op_delete(key: Key) -> Operation {
+        op(key, del())
+    }
+
+    fn shard_op_num(key: Key, num: u64) -> ShardOp {
+        shard_op(key, val(num))
+    }
+
     #[test]
     fn prepare_journal_requires_shards() {
         let metadata = Arc::new(MemoryMetadataStore::default());
@@ -301,12 +344,12 @@ mod tests {
     fn prepare_journal_collects_expected_undo_entries() {
         let metadata = Arc::new(MemoryMetadataStore::default());
         let shard = Arc::new(RawTableShard::new(0, 8)) as Arc<dyn StateShard>;
-        shard.apply(&[shard_op([1u8; 8], 3)]);
+        shard.apply(&[shard_op_num([1u8; 8], 3)]);
 
         let engine = ShardedStateEngine::new(vec![Arc::clone(&shard)], Arc::clone(&metadata));
         let key = [1u8; 8];
 
-        let ops = vec![op(key, 10), op(key, 0)];
+        let ops = vec![op_num(key, 10), op_delete(key)];
 
         let delta = engine.prepare_journal(2, &ops).unwrap();
         assert_eq!(delta.block_height, 2);
@@ -315,9 +358,9 @@ mod tests {
         let shard_delta = &delta.shards[0];
         assert_eq!(shard_delta.operations.len(), 2);
         assert_eq!(shard_delta.undo_entries.len(), 2);
-        assert_eq!(shard_delta.undo_entries[0].previous, Some(3));
+        assert_eq!(shard_delta.undo_entries[0].previous, Some(val(3)));
         assert_eq!(shard_delta.undo_entries[0].op, UndoOp::Updated);
-        assert_eq!(shard_delta.undo_entries[1].previous, Some(10));
+        assert_eq!(shard_delta.undo_entries[1].previous, Some(val(10)));
         assert_eq!(shard_delta.undo_entries[1].op, UndoOp::Deleted);
     }
 
@@ -328,14 +371,14 @@ mod tests {
         let engine = ShardedStateEngine::new(vec![Arc::clone(&shard)], Arc::clone(&metadata));
         let key = [7u8; 8];
 
-        let ops = vec![op(key, 5), op(key, 9)];
+        let ops = vec![op_num(key, 5), op_num(key, 9)];
 
         let delta = engine.prepare_journal(1, &ops).unwrap();
         let (stats, undo) = engine.commit(1, delta).unwrap();
 
         assert_eq!(stats.operation_count, 2);
         assert_eq!(stats.modified_keys, 2);
-        assert_eq!(engine.lookup(&key), Some(9));
+        assert_eq!(engine.lookup(&key).map(Value::from), Some(val(9)));
         assert_eq!(undo.block_height, 1);
         assert_eq!(undo.shard_undos.len(), 1);
         assert_eq!(undo.shard_undos[0].entries.len(), 2);
@@ -350,8 +393,8 @@ mod tests {
         let shard_a = Arc::new(RawTableShard::new(0, 8)) as Arc<dyn StateShard>;
         let shard_b = Arc::new(RawTableShard::new(1, 8)) as Arc<dyn StateShard>;
 
-        shard_a.apply(&[shard_op([1u8; 8], 10)]);
-        shard_b.apply(&[shard_op([2u8; 8], 20)]);
+        shard_a.apply(&[shard_op_num([1u8; 8], 10)]);
+        shard_b.apply(&[shard_op_num([2u8; 8], 20)]);
 
         let engine =
             ShardedStateEngine::new(vec![Arc::clone(&shard_a), Arc::clone(&shard_b)], metadata);
@@ -359,7 +402,11 @@ mod tests {
         let keys = vec![[2u8; 8], [3u8; 8], [1u8; 8]];
         let results = engine.lookup_many(&keys);
 
-        assert_eq!(results, vec![Some(20), None, Some(10)]);
+        let actual: Vec<Option<Value>> = results
+            .into_iter()
+            .map(|opt| opt.map(Value::from))
+            .collect();
+        assert_eq!(actual, vec![Some(val(20)), None, Some(val(10))]);
     }
 
     #[test]
@@ -387,7 +434,7 @@ mod tests {
         let engine = ShardedStateEngine::new(vec![Arc::clone(&shard)], metadata);
         let key = [2u8; 8];
 
-        let ops = vec![op(key, 0)];
+        let ops = vec![op_delete(key)];
         let delta = engine.prepare_journal(5, &ops).unwrap();
         let (stats, undo) = engine.commit(5, delta).unwrap();
 
@@ -450,7 +497,10 @@ mod tests {
             block_height: 1,
             shards: vec![ShardDelta {
                 shard_index: 5,
-                operations: vec![ShardOp { key, value: 1 }],
+                operations: vec![ShardOp {
+                    key,
+                    value: 1.into(),
+                }],
                 undo_entries: Vec::new(),
             }],
         };
@@ -553,13 +603,17 @@ mod tests {
                 0,
                 i as u8,
             ];
-            ops.push(op(key, i));
+            if i == 0 {
+                ops.push(op_delete(key));
+            } else {
+                ops.push(op_num(key, i));
+            }
         }
 
         let delta = engine.prepare_journal(1, &ops).unwrap();
         let (stats, undo) = engine.commit(1, delta).unwrap();
         assert_eq!(stats.operation_count, ops.len());
-        let zero_deletes = ops.iter().filter(|op| op.value == 0).count();
+        let zero_deletes = ops.iter().filter(|op| op.value.is_delete()).count();
         assert_eq!(stats.modified_keys, ops.len() - zero_deletes);
 
         for i in [0u64, 1, 10, 63] {
@@ -573,8 +627,8 @@ mod tests {
                 0,
                 i as u8,
             ];
-            let expected = if i == 0 { None } else { Some(i) };
-            assert_eq!(engine.lookup(&key), expected);
+            let expected = if i == 0 { None } else { Some(val(i)) };
+            assert_eq!(engine.lookup(&key).map(Value::from), expected);
         }
 
         engine.revert(1, undo).unwrap();

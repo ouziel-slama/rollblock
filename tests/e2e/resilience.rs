@@ -21,7 +21,14 @@ fn e2e_checksum_corruption() -> StoreResult<()> {
     let store = harness.open()?;
 
     let key = [0xD1u8; 8];
-    apply_block(&store, 1, vec![Operation { key, value: 123 }])?;
+    apply_block(
+        &store,
+        1,
+        vec![Operation {
+            key,
+            value: 123.into(),
+        }],
+    )?;
     wait_for_durable(&store, 1, DEFAULT_TIMEOUT)?;
     store.close()?;
     drop(store);
@@ -72,7 +79,7 @@ fn e2e_large_batch_bounds() -> StoreResult<()> {
         operations.push(Operation {
             key,
             // Zero-value operations are treated as deletes; offset by 1 to ensure insertion.
-            value: i as u64 + 1,
+            value: (i as u64 + 1).into(),
         });
     }
 
@@ -111,11 +118,17 @@ fn e2e_block_facade_end_block_failure_is_fatal() -> StoreResult<()> {
     let key = [0xEFu8; 8];
 
     block_facade.start_block(1)?;
-    block_facade.set(Operation { key, value: 11 })?;
+    block_facade.set(Operation {
+        key,
+        value: 11.into(),
+    })?;
     block_facade.end_block()?;
 
     block_facade.start_block(1)?;
-    block_facade.set(Operation { key, value: 9 })?;
+    block_facade.set(Operation {
+        key,
+        value: 9.into(),
+    })?;
     let err = block_facade.end_block().unwrap_err();
     match err {
         MhinStoreError::DurabilityFailure { block, reason } => {

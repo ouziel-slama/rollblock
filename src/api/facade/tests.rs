@@ -167,7 +167,7 @@ mod facade_tests {
     use crate::block_journal::{BlockJournal, JournalBlock, JournalIter};
     use crate::metadata::{LmdbMetadataStore, MetadataStore};
     use crate::snapshot::Snapshotter;
-    use crate::types::{BlockUndo, JournalMeta};
+    use crate::types::{BlockUndo, JournalMeta, ValueBuf};
     use crate::{
         BlockOrchestrator, FileBlockJournal, MhinStoreError, MmapSnapshotter, RawTableShard,
         ShardedStateEngine, StateShard,
@@ -218,11 +218,11 @@ mod facade_tests {
         }
 
         fn fetch(&self, _key: Key) -> StoreResult<Value> {
-            Ok(0)
+            Ok(Value::empty())
         }
 
         fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
-            Ok(vec![0; keys.len()])
+            Ok(vec![Value::empty(); keys.len()])
         }
 
         fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
@@ -289,7 +289,7 @@ mod facade_tests {
                 .unwrap()
                 .push((block_height, ops.clone()));
             for op in ops {
-                if op.value == 0 {
+                if op.value.is_delete() {
                     self.state.lock().unwrap().remove(&op.key);
                 } else {
                     self.state.lock().unwrap().insert(op.key, op.value);
@@ -307,7 +307,13 @@ mod facade_tests {
 
         fn fetch(&self, key: Key) -> StoreResult<Value> {
             self.lookups.lock().unwrap().push(key);
-            Ok(self.state.lock().unwrap().get(&key).copied().unwrap_or(0))
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(Value::empty))
         }
 
         fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
@@ -319,7 +325,7 @@ mod facade_tests {
             let state = self.state.lock().unwrap();
             Ok(keys
                 .iter()
-                .map(|key| state.get(key).copied().unwrap_or(0))
+                .map(|key| state.get(key).cloned().unwrap_or_else(Value::empty))
                 .collect())
         }
 
@@ -363,12 +369,12 @@ mod facade_tests {
 
         fn fetch(&self, _key: Key) -> StoreResult<Value> {
             self.ensure_healthy()?;
-            Ok(0)
+            Ok(Value::empty())
         }
 
         fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
             self.ensure_healthy()?;
-            Ok(vec![0; keys.len()])
+            Ok(vec![Value::empty(); keys.len()])
         }
 
         fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
@@ -502,10 +508,10 @@ mod facade_tests {
         }
     }
 
-    fn sample_operation(value: Value) -> Operation {
+    fn sample_operation(value: u64) -> Operation {
         Operation {
             key: [value as u8; 8],
-            value,
+            value: value.into(),
         }
     }
 
@@ -628,7 +634,13 @@ mod facade_tests {
 
         let key = [42u8; 8];
         facade
-            .set(1, vec![Operation { key, value: 7 }])
+            .set(
+                1,
+                vec![Operation {
+                    key,
+                    value: 7.into(),
+                }],
+            )
             .expect("set should succeed");
         assert_eq!(facade.get(key).unwrap(), 7);
 
@@ -682,11 +694,11 @@ mod facade_tests {
                 vec![
                     Operation {
                         key: key_a,
-                        value: 10,
+                        value: 10.into(),
                     },
                     Operation {
                         key: key_b,
-                        value: 11,
+                        value: 11.into(),
                     },
                 ],
             )
@@ -699,7 +711,7 @@ mod facade_tests {
                 2,
                 vec![Operation {
                     key: key_a,
-                    value: 12,
+                    value: 12.into(),
                 }],
             )
             .expect("second block should apply");
@@ -712,11 +724,11 @@ mod facade_tests {
                 vec![
                     Operation {
                         key: key_b,
-                        value: 20,
+                        value: 20.into(),
                     },
                     Operation {
                         key: [7u8; 8],
-                        value: 30,
+                        value: 30.into(),
                     },
                 ],
             )
@@ -752,7 +764,7 @@ mod facade_tests {
             .collect();
 
         let key = [1u8; 8];
-        shards[0].import_data(vec![(key, 42)]);
+        shards[0].import_data(vec![(key, ValueBuf::from(Value::from(42u64)))]);
         let valid_snapshot_path = snapshotter.create_snapshot(10, &shards).unwrap();
         assert!(valid_snapshot_path.exists());
 
@@ -776,7 +788,7 @@ mod facade_tests {
             !corrupted_path.exists(),
             "corrupted snapshot should be deleted"
         );
-        assert_eq!(shards[0].get(&key), Some(42));
+        assert_eq!(shards[0].get(&key).map(Value::from), Some(42.into()));
     }
 
     #[test]
@@ -940,7 +952,12 @@ mod facade_tests {
         let key = [42u8; 8];
 
         facade.start_block(1).unwrap();
-        facade.set(Operation { key, value: 5 }).unwrap();
+        facade
+            .set(Operation {
+                key,
+                value: 5.into(),
+            })
+            .unwrap();
         assert_eq!(
             facade.get(key).unwrap(),
             5,
@@ -976,19 +993,35 @@ mod facade_tests {
         // Seed orchestrator with existing value through regular set.
         facade
             .inner()
-            .set(1, vec![Operation { key, value: 10 }])
+            .set(
+                1,
+                vec![Operation {
+                    key,
+                    value: 10.into(),
+                }],
+            )
             .unwrap();
         assert_eq!(facade.get(key).unwrap(), 10);
 
         facade.start_block(2).unwrap();
-        facade.set(Operation { key, value: 99 }).unwrap();
+        facade
+            .set(Operation {
+                key,
+                value: 99.into(),
+            })
+            .unwrap();
         assert_eq!(
             facade.get(key).unwrap(),
             99,
             "staged set should shadow persisted value"
         );
 
-        facade.set(Operation { key, value: 0 }).unwrap();
+        facade
+            .set(Operation {
+                key,
+                value: Value::empty(),
+            })
+            .unwrap();
         assert_eq!(
             facade.get(key).unwrap(),
             0,
@@ -1018,7 +1051,7 @@ mod facade_tests {
         let err = facade
             .set(Operation {
                 key: [0u8; 8],
-                value: 1,
+                value: 1.into(),
             })
             .unwrap_err();
         assert!(
@@ -1056,7 +1089,12 @@ mod facade_tests {
         let key = [5u8; 8];
 
         facade.start_block(1).unwrap();
-        facade.set(Operation { key, value: 21 }).unwrap();
+        facade
+            .set(Operation {
+                key,
+                value: 21.into(),
+            })
+            .unwrap();
 
         let err = facade.end_block().unwrap_err();
         match err {
@@ -1101,7 +1139,13 @@ mod facade_tests {
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
             store
-                .set(1, vec![Operation { key, value: 99 }])
+                .set(
+                    1,
+                    vec![Operation {
+                        key,
+                        value: 99.into(),
+                    }],
+                )
                 .expect("set should succeed");
             store.close().expect("close should succeed");
         }
@@ -1122,7 +1166,13 @@ mod facade_tests {
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
             store
-                .set(1, vec![Operation { key, value: 7 }])
+                .set(
+                    1,
+                    vec![Operation {
+                        key,
+                        value: 7.into(),
+                    }],
+                )
                 .expect("set should succeed");
             // drop without calling close()
         }
@@ -1158,7 +1208,13 @@ mod facade_tests {
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
             store
-                .set(1, vec![Operation { key, value: 10 }])
+                .set(
+                    1,
+                    vec![Operation {
+                        key,
+                        value: 10.into(),
+                    }],
+                )
                 .expect("first block should apply");
             store.close().expect("close should persist snapshot");
         }
@@ -1172,7 +1228,13 @@ mod facade_tests {
                 "snapshot should restore first block"
             );
             store
-                .set(2, vec![Operation { key, value: 99 }])
+                .set(
+                    2,
+                    vec![Operation {
+                        key,
+                        value: 99.into(),
+                    }],
+                )
                 .expect("second block should apply in-memory");
             wait_for_durable(&store, 2);
             // drop without close to simulate crash before snapshot
@@ -1211,7 +1273,13 @@ mod facade_tests {
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
             store
-                .set(1, vec![Operation { key, value: 5 }])
+                .set(
+                    1,
+                    vec![Operation {
+                        key,
+                        value: 5.into(),
+                    }],
+                )
                 .expect("first block should apply");
             store.close().expect("close should create snapshot");
         }
@@ -1224,7 +1292,13 @@ mod facade_tests {
             let store =
                 MhinStoreFacade::new(config.clone()).expect("store should reopen with snapshot");
             store
-                .set(2, vec![Operation { key, value: 50 }])
+                .set(
+                    2,
+                    vec![Operation {
+                        key,
+                        value: 50.into(),
+                    }],
+                )
                 .expect("second block should apply");
             store
                 .close()
@@ -1276,10 +1350,22 @@ mod facade_tests {
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
             store
-                .set(1, vec![Operation { key, value: 10 }])
+                .set(
+                    1,
+                    vec![Operation {
+                        key,
+                        value: 10.into(),
+                    }],
+                )
                 .expect("first block should apply");
             store
-                .set(2, vec![Operation { key, value: 20 }])
+                .set(
+                    2,
+                    vec![Operation {
+                        key,
+                        value: 20.into(),
+                    }],
+                )
                 .expect("second block should apply");
             store.rollback(1).expect("rollback should succeed");
             assert_eq!(
@@ -1320,10 +1406,22 @@ mod facade_tests {
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
             store
-                .set(1, vec![Operation { key, value: 11 }])
+                .set(
+                    1,
+                    vec![Operation {
+                        key,
+                        value: 11.into(),
+                    }],
+                )
                 .expect("first block should apply");
             store
-                .set(2, vec![Operation { key, value: 22 }])
+                .set(
+                    2,
+                    vec![Operation {
+                        key,
+                        value: 22.into(),
+                    }],
+                )
                 .expect("second block should apply");
             wait_for_durable(&store, 2);
             // Drop without closing to leave journal as-is.
@@ -1454,8 +1552,8 @@ mod facade_tests {
         let orchestrator = DummyOrchestrator::new();
         {
             let mut state = orchestrator.state.lock().unwrap();
-            state.insert([1u8; 8], 11);
-            state.insert([3u8; 8], 33);
+            state.insert([1u8; 8], 11.into());
+            state.insert([3u8; 8], 33.into());
         }
 
         let facade = MhinStoreFacade::new_for_testing(
@@ -1474,7 +1572,11 @@ mod facade_tests {
     fn block_facade_multi_get_includes_staged_operations() {
         let orchestrator = DummyOrchestrator::new();
         {
-            orchestrator.state.lock().unwrap().insert([9u8; 8], 5);
+            orchestrator
+                .state
+                .lock()
+                .unwrap()
+                .insert([9u8; 8], 5.into());
         }
 
         let inner = MhinStoreFacade::new_for_testing(
@@ -1488,13 +1590,13 @@ mod facade_tests {
         block_facade
             .set(Operation {
                 key: [1u8; 8],
-                value: 42,
+                value: 42.into(),
             })
             .expect("staged insert should succeed");
         block_facade
             .set(Operation {
                 key: [9u8; 8],
-                value: 0,
+                value: Value::empty(),
             })
             .expect("staged delete should succeed");
 

@@ -33,7 +33,7 @@
 //! let ops = vec![
 //!     Operation {
 //!         key: [1, 2, 3, 4, 5, 6, 7, 8],
-//!         value: 42,
+//!         value: b"answer".to_vec().into(),
 //!     },
 //! ];
 //! store.set(1, ops)?;
@@ -41,10 +41,10 @@
 //! // Read value
 //! let key = [1, 2, 3, 4, 5, 6, 7, 8];
 //! let value = store.get(key)?;
-//! if value == 0 {
+//! if value.is_delete() {
 //!     println!("Key not found");
 //! } else {
-//!     println!("Value: {:?}", value);
+//!     println!("Value bytes: {:?}", value.as_slice());
 //! }
 //!
 //! // Rollback

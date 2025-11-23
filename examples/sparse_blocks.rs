@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         100,
         vec![Operation {
             key: key_a,
-            value: 100,
+            value: 100.into(),
         }],
     )?;
 
@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         500,
         vec![Operation {
             key: key_b,
-            value: 500,
+            value: 500.into(),
         }],
     )?;
 
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1000,
         vec![Operation {
             key: key_c,
-            value: 1000,
+            value: 1000.into(),
         }],
     )?;
 
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1500,
         vec![Operation {
             key: key_a,
-            value: 1500,
+            value: 1500.into(),
         }],
     )?;
 
@@ -120,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         4000,
         vec![Operation {
             key: key_d,
-            value: 4000,
+            value: 4000.into(),
         }],
     )?;
 

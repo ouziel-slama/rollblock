@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1,
         vec![Operation {
             key: hot_key,
-            value: 1_337,
+            value: 1_337.into(),
         }],
     )?;
 
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let value = client.get_one(hot_key)?;
     client.close()?;
 
-    println!("Remote read returned value={value}");
+    println!("Remote read returned {} bytes", value.len());
 
     if let Some(metrics) = store.remote_server_metrics() {
         println!(

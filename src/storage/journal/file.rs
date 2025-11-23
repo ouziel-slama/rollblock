@@ -9,7 +9,7 @@ use crate::storage::fs::sync_directory;
 use crate::types::{BlockId, BlockUndo, JournalMeta, Operation};
 
 use super::format::{
-    checksum_to_u32, read_journal_block, total_entry_count, JournalHeader,
+    checksum_to_u32, read_journal_block, serialize_journal_block, JournalHeader,
     JOURNAL_FLAG_UNCOMPRESSED, JOURNAL_HEADER_FLAG_NONE,
 };
 use super::{BlockJournal, JournalBlock, JournalIter, JournalOptions};
@@ -130,13 +130,7 @@ impl BlockJournal for FileBlockJournal {
         let (mut journal, journal_created) = self.open_journal_for_write()?;
         let offset = journal.metadata()?.len();
 
-        let entry = JournalBlock {
-            block_height: block,
-            operations: operations.to_vec(),
-            undo: undo.clone(),
-        };
-
-        let serialized = bincode::serialize(&entry)?;
+        let (serialized, entry_count) = serialize_journal_block(block, undo, operations)?;
         let (payload, flags) = if self.options.compress {
             (
                 zstd::stream::encode_all(serialized.as_slice(), self.options.compression_level)?,
@@ -148,12 +142,6 @@ impl BlockJournal for FileBlockJournal {
 
         let checksum_hash = blake3::hash(&payload);
         let checksum = checksum_to_u32(checksum_hash);
-
-        let entry_count: u32 = total_entry_count(&entry.undo.shard_undos)
-            .try_into()
-            .map_err(|_| MhinStoreError::InvalidJournalHeader {
-                reason: "entry count overflow",
-            })?;
 
         let header = JournalHeader::new(
             block,
@@ -266,14 +254,14 @@ mod tests {
     fn sample_operations(block: BlockId) -> Vec<Operation> {
         vec![Operation {
             key: [block as u8; 8],
-            value: block,
+            value: block.into(),
         }]
     }
 
     fn sample_undo(block: BlockId) -> BlockUndo {
         BlockUndo {
             block_height: block,
-            shard_undos: vec![sample_shard(0, [1u8; 8], 42)],
+            shard_undos: vec![sample_shard(0, [1u8; 8], 42.into())],
         }
     }
 
@@ -297,6 +285,50 @@ mod tests {
         assert_eq!(read_entry.undo.shard_undos.len(), 1);
         assert_eq!(read_entry.operations.len(), 1);
         assert_eq!(read_entry.operations[0].value, block_height);
+        assert!(iter.next_entry().is_none());
+    }
+
+    #[test]
+    fn append_block_with_variable_length_values() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let journal = FileBlockJournal::new(tmp.path()).unwrap();
+
+        let block_height = 11;
+        let undo = sample_undo(block_height);
+        let mut large_value = vec![0xAB; crate::types::MAX_VALUE_BYTES];
+        large_value[0] = 0xCD;
+
+        let operations = vec![
+            Operation {
+                key: [0x01; 8],
+                value: Value::from_vec(vec![1, 2, 3, 4, 5]),
+            },
+            Operation {
+                key: [0x02; 8],
+                value: Value::from_vec(large_value),
+            },
+            Operation {
+                key: [0x03; 8],
+                value: Value::empty(),
+            },
+        ];
+
+        journal
+            .append(block_height, &undo, &operations)
+            .expect("append succeeds");
+
+        let mut iter = journal.iter_backwards(block_height, block_height).unwrap();
+        let entry = iter.next_entry().unwrap().unwrap();
+        assert_eq!(entry.block_height, block_height);
+        assert_eq!(entry.operations.len(), operations.len());
+        assert_eq!(entry.operations[0].value.as_slice(), &[1, 2, 3, 4, 5]);
+        assert_eq!(
+            entry.operations[1].value.len(),
+            crate::types::MAX_VALUE_BYTES
+        );
+        assert!(entry.operations[2].is_delete());
         assert!(iter.next_entry().is_none());
     }
 

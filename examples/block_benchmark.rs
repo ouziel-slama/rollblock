@@ -6,6 +6,7 @@
 use heed::types::Bytes;
 use heed::{EnvFlags, EnvOpenOptions};
 use rollblock::types::Operation;
+use rollblock::Value;
 use rollblock::{DurabilityMode, MhinStoreFacade, StoreConfig, StoreFacade};
 use std::collections::VecDeque;
 use std::env;
@@ -263,7 +264,7 @@ fn run_scenario(scenario: &Scenario, total_blocks: u64) -> Result<Duration, Box<
             let key = next_key.to_le_bytes();
             operations.push(Operation {
                 key,
-                value: next_key,
+                value: next_key.into(),
             });
             live_keys.push_back(key);
             next_key += 1;
@@ -273,7 +274,10 @@ fn run_scenario(scenario: &Scenario, total_blocks: u64) -> Result<Duration, Box<
             let key = live_keys
                 .pop_front()
                 .expect("live key pool should always have enough entries");
-            operations.push(Operation { key, value: 0 });
+            operations.push(Operation {
+                key,
+                value: Value::empty(),
+            });
         }
 
         store.set(block, operations)?;

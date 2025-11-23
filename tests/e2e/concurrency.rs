@@ -23,7 +23,14 @@ fn e2e_multi_reader() -> StoreResult<()> {
     let store = harness.open()?;
     let key = [0xE1u8; 8];
 
-    apply_block(&store, 1, vec![Operation { key, value: 1 }])?;
+    apply_block(
+        &store,
+        1,
+        vec![Operation {
+            key,
+            value: 1.into(),
+        }],
+    )?;
     wait_for_durable(&store, 1, DEFAULT_TIMEOUT)?;
 
     let barrier = Arc::new(Barrier::new(3));
@@ -42,7 +49,7 @@ fn e2e_multi_reader() -> StoreResult<()> {
                 block,
                 vec![Operation {
                     key: writer_key,
-                    value: block,
+                    value: block.into(),
                 }],
             )?;
             wait_for_durable(&writer_store, block, DEFAULT_TIMEOUT)?;
@@ -59,17 +66,19 @@ fn e2e_multi_reader() -> StoreResult<()> {
         thread::spawn(move || -> StoreResult<Vec<u64>> {
             reader_barrier.wait();
 
-            let mut observed = Vec::new();
+            let mut observed: Vec<u64> = Vec::new();
             let mut last_seen = 1;
             let deadline = Instant::now() + DEFAULT_TIMEOUT;
 
             loop {
                 let value = reader_store.get(key)?;
-                if value > last_seen {
-                    last_seen = value;
-                    observed.push(value);
-                    if value == FINAL_BLOCK {
-                        break;
+                if let Some(observed_value) = value.to_u64() {
+                    if observed_value > last_seen {
+                        last_seen = observed_value;
+                        observed.push(observed_value);
+                        if observed_value == FINAL_BLOCK {
+                            break;
+                        }
                     }
                 }
 
@@ -173,7 +182,7 @@ fn e2e_parallel_execution() -> StoreResult<()> {
         .enumerate()
         .map(|(i, &key)| Operation {
             key,
-            value: 100 + i as u64,
+            value: (100 + i as u64).into(),
         })
         .collect();
     apply_block(&store, 1, initial_operations)?;
@@ -185,7 +194,7 @@ fn e2e_parallel_execution() -> StoreResult<()> {
             .enumerate()
             .map(|(i, &key)| Operation {
                 key,
-                value: block * 1_000 + i as u64,
+                value: (block * 1_000 + i as u64).into(),
             })
             .collect();
         apply_block(&store, block, block_operations)?;

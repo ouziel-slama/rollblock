@@ -1,4 +1,4 @@
-use crate::types::{Key, ShardOp, ShardStats, ShardUndo, Value};
+use crate::types::{Key, ShardOp, ShardStats, ShardUndo, ValueBuf};
 
 pub mod raw_table;
 
@@ -7,9 +7,9 @@ pub use raw_table::RawTableShard;
 pub trait StateShard: Send + Sync {
     fn apply(&self, ops: &[ShardOp]) -> ShardUndo;
     fn revert(&self, undo: &ShardUndo);
-    fn get(&self, key: &Key) -> Option<Value>;
+    fn get(&self, key: &Key) -> Option<ValueBuf>;
     /// Fetches multiple keys while allowing implementations to amortize locking.
-    fn get_many(&self, keys: &[Key], out: &mut [Option<Value>]) {
+    fn get_many(&self, keys: &[Key], out: &mut [Option<ValueBuf>]) {
         debug_assert_eq!(
             keys.len(),
             out.len(),
@@ -23,19 +23,19 @@ pub trait StateShard: Send + Sync {
     fn stats(&self) -> ShardStats;
 
     /// Export all key-value pairs from this shard
-    fn export_data(&self) -> Vec<(Key, Value)>;
+    fn export_data(&self) -> Vec<(Key, ValueBuf)>;
 
     /// Visit all key-value pairs without allocating an intermediate buffer.
     ///
     /// Implementations should provide a streaming traversal to avoid
     /// materialising large shards in memory. The default implementation falls
     /// back to `export_data` for metadata-only shards used in tests.
-    fn visit_entries(&self, visitor: &mut dyn FnMut(Key, Value)) {
+    fn visit_entries(&self, visitor: &mut dyn FnMut(Key, ValueBuf)) {
         for (key, value) in self.export_data() {
             visitor(key, value);
         }
     }
 
     /// Clear all data and import the provided key-value pairs
-    fn import_data(&self, data: Vec<(Key, Value)>);
+    fn import_data(&self, data: Vec<(Key, ValueBuf)>);
 }

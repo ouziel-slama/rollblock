@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::error::{MhinStoreError, StoreResult};
 use crate::state::shard::StateShard;
 use crate::types::{
-    BlockDelta, BlockId, Key, Operation, ShardDelta, ShardOp, UndoEntry, UndoOp, Value,
+    BlockDelta, BlockId, Key, Operation, ShardDelta, ShardOp, UndoEntry, UndoOp, Value, ValueBuf,
 };
 
 pub(crate) fn plan_block_delta(
@@ -28,7 +28,7 @@ pub(crate) fn plan_block_delta(
             undo_entries: Vec::new(),
         })
         .collect();
-    let mut planned_states: Vec<HashMap<Key, Option<Value>>> =
+    let mut planned_states: Vec<HashMap<Key, Option<ValueBuf>>> =
         (0..shard_count).map(|_| HashMap::new()).collect();
 
     for op in ops {
@@ -40,21 +40,21 @@ pub(crate) fn plan_block_delta(
         let shard_delta = &mut deltas[shard_index];
         shard_delta.operations.push(ShardOp {
             key: op.key,
-            value: op.value,
+            value: op.value.clone(),
         });
 
         let plan = &mut planned_states[shard_index];
         let previous_state = if let Some(state) = plan.get(&op.key) {
-            *state
+            state.clone()
         } else {
             shard.get(&op.key)
         };
 
         if op.is_delete() {
-            if let Some(previous) = previous_state {
+            if let Some(ref previous) = previous_state {
                 shard_delta.undo_entries.push(UndoEntry {
                     key: op.key,
-                    previous: Some(previous),
+                    previous: Some(Value::from(previous.clone())),
                     op: UndoOp::Deleted,
                 });
             }
@@ -68,11 +68,11 @@ pub(crate) fn plan_block_delta(
 
             shard_delta.undo_entries.push(UndoEntry {
                 key: op.key,
-                previous: previous_state,
+                previous: previous_state.as_ref().map(|buf| Value::from(buf.clone())),
                 op: undo_op,
             });
 
-            plan.insert(op.key, Some(op.value));
+            plan.insert(op.key, Some(ValueBuf::from(&op.value)));
         }
     }
 

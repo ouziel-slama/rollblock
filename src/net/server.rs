@@ -20,6 +20,7 @@ use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig as TlsServerCon
 use tokio_rustls::TlsAcceptor;
 
 use crate::facade::{MhinStoreFacade, StoreFacade};
+use crate::types::{Value, MAX_VALUE_BYTES};
 
 use super::BasicAuthConfig;
 
@@ -27,8 +28,9 @@ type BufferedReader<S> = AsyncBufReader<ReadHalf<S>>;
 type StreamWriter<S> = WriteHalf<S>;
 
 const KEY_WIDTH: usize = 8;
-const VALUE_WIDTH: usize = 8;
+const VALUE_LEN_WIDTH: usize = 2;
 const MAX_KEYS_PER_REQUEST: usize = 255;
+const MAX_RESPONSE_BYTES: usize = MAX_KEYS_PER_REQUEST * (VALUE_LEN_WIDTH + MAX_VALUE_BYTES);
 const MAX_AUTH_HEADER_LEN: usize = 512;
 
 const AUTH_READY: u8 = 0;
@@ -335,7 +337,6 @@ where
     }
 
     let mut request_buf = Vec::with_capacity(KEY_WIDTH * MAX_KEYS_PER_REQUEST);
-    let mut response_buf = Vec::with_capacity(VALUE_WIDTH * MAX_KEYS_PER_REQUEST);
 
     loop {
         let key_count = match read_key_count(&mut reader, &state).await {
@@ -366,7 +367,6 @@ where
         }
 
         let start = Instant::now();
-        response_buf.resize(key_count as usize * VALUE_WIDTH, 0);
 
         let keys: Vec<[u8; KEY_WIDTH]> = request_buf
             .chunks_exact(KEY_WIDTH)
@@ -378,7 +378,16 @@ where
             .collect();
 
         let store = state.store.clone();
-        let values = match spawn_blocking(move || store.multi_get(&keys)).await {
+        let values = match spawn_blocking(move || {
+            store.multi_get(&keys).map(|values| {
+                values
+                    .into_iter()
+                    .map(Value::into_inner)
+                    .collect::<Vec<Vec<u8>>>()
+            })
+        })
+        .await
+        {
             Ok(Ok(values)) => values,
             Ok(Err(err)) => {
                 tracing::error!(?err, "store get failed");
@@ -394,13 +403,56 @@ where
             }
         };
 
-        for (value, slot) in values.into_iter().zip(response_buf.chunks_mut(VALUE_WIDTH)) {
-            slot.copy_from_slice(&value.to_le_bytes());
+        if values.len() != key_count as usize {
+            tracing::error!(
+                returned = values.len(),
+                requested = key_count,
+                "store returned mismatched value count"
+            );
+            send_code(&mut write_half, ERR_STORE_FAILURE).await.ok();
+            state.metrics.record_failure();
+            return Err(ConnectionError::Store);
         }
 
-        if let Err(err) = write_half.write_all(&response_buf).await {
-            tracing::warn!(?err, "failed to write remote response");
-            return Err(ConnectionError::Io);
+        let mut total_response_bytes = 0usize;
+        for value in &values {
+            let len = value.len();
+            if len > MAX_VALUE_BYTES {
+                tracing::warn!(
+                    value_len = len,
+                    "value length exceeds MAX_VALUE_BYTES in remote response"
+                );
+                send_code(&mut write_half, ERR_INVALID_PAYLOAD).await.ok();
+                state.metrics.record_failure();
+                return Err(ConnectionError::Protocol(ProtocolError::InvalidPayload));
+            }
+            total_response_bytes = match total_response_bytes.checked_add(VALUE_LEN_WIDTH + len) {
+                Some(total) => total,
+                None => {
+                    send_code(&mut write_half, ERR_INVALID_PAYLOAD).await.ok();
+                    state.metrics.record_failure();
+                    return Err(ConnectionError::Protocol(ProtocolError::InvalidPayload));
+                }
+            };
+            if total_response_bytes > MAX_RESPONSE_BYTES {
+                send_code(&mut write_half, ERR_INVALID_PAYLOAD).await.ok();
+                state.metrics.record_failure();
+                return Err(ConnectionError::Protocol(ProtocolError::InvalidPayload));
+            }
+        }
+
+        for value in values {
+            let len = value.len() as u16;
+            if let Err(err) = write_half.write_all(&len.to_le_bytes()).await {
+                tracing::warn!(?err, "failed to write value length");
+                return Err(ConnectionError::Io);
+            }
+            if !value.is_empty() {
+                if let Err(err) = write_half.write_all(&value).await {
+                    tracing::warn!(?err, "failed to write value payload");
+                    return Err(ConnectionError::Io);
+                }
+            }
         }
         if let Err(err) = write_half.flush().await {
             tracing::warn!(?err, "failed to flush remote response");
@@ -703,7 +755,7 @@ mod tests {
         fn apply_operations(&self, _block_height: BlockId, ops: Vec<Operation>) -> StoreResult<()> {
             let mut state = self.values.lock().unwrap();
             for op in ops {
-                if op.value == 0 {
+                if op.value.is_delete() {
                     state.remove(&op.key);
                 } else {
                     state.insert(op.key, op.value);
@@ -718,7 +770,13 @@ mod tests {
 
         fn fetch(&self, key: Key) -> StoreResult<Value> {
             self.single_fetches.fetch_add(1, Ordering::AcqRel);
-            Ok(self.values.lock().unwrap().get(&key).copied().unwrap_or(0))
+            Ok(self
+                .values
+                .lock()
+                .unwrap()
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(Value::empty))
         }
 
         fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
@@ -726,7 +784,7 @@ mod tests {
             let state = self.values.lock().unwrap();
             Ok(keys
                 .iter()
-                .map(|key| state.get(key).copied().unwrap_or(0))
+                .map(|key| state.get(key).cloned().unwrap_or_else(Value::empty))
                 .collect())
         }
 
@@ -758,8 +816,8 @@ mod tests {
     #[tokio::test]
     async fn serve_connection_batches_remote_reads() {
         let orchestrator = CountingOrchestrator::new();
-        orchestrator.put([1u8; 8], 7);
-        orchestrator.put([2u8; 8], 19);
+        orchestrator.put([1u8; 8], 7.into());
+        orchestrator.put([2u8; 8], 19.into());
 
         let facade = MhinStoreFacade::new_for_testing(
             orchestrator.clone(),
@@ -797,18 +855,22 @@ mod tests {
             client.write_all(&key).await.unwrap();
         }
 
-        let mut response = vec![0u8; keys.len() * VALUE_WIDTH];
-        client.read_exact(&mut response).await.unwrap();
+        let mut values = Vec::new();
+        for _ in 0..keys.len() {
+            let mut len_buf = [0u8; VALUE_LEN_WIDTH];
+            client.read_exact(&mut len_buf).await.unwrap();
+            let value_len = u16::from_le_bytes(len_buf) as usize;
+            let mut value_bytes = vec![0u8; value_len];
+            if value_len > 0 {
+                client.read_exact(&mut value_bytes).await.unwrap();
+            }
+            let mut buf = [0u8; 8];
+            buf[..value_len].copy_from_slice(&value_bytes);
+            values.push(u64::from_le_bytes(buf));
+        }
         drop(client);
 
         server_task.await.unwrap().unwrap();
-
-        let mut values = Vec::new();
-        for chunk in response.chunks_exact(VALUE_WIDTH) {
-            let mut buf = [0u8; VALUE_WIDTH];
-            buf.copy_from_slice(chunk);
-            values.push(u64::from_le_bytes(buf));
-        }
 
         assert_eq!(values, vec![7, 19]);
         assert_eq!(orchestrator.batch_fetches(), 1);

@@ -300,8 +300,11 @@ impl BlockJournal for SlowJournal {
     }
 }
 
-pub fn operation(key: Key, value: Value) -> Operation {
-    Operation { key, value }
+pub fn operation<V: Into<Value>>(key: Key, value: V) -> Operation {
+    Operation {
+        key,
+        value: value.into(),
+    }
 }
 
 pub fn wait_for_block(metadata: &Arc<MemoryMetadataStore>, target: BlockId) {

@@ -1,4 +1,5 @@
-use rollblock::types::Operation;
+use rollblock::types::{Operation, MAX_VALUE_BYTES};
+use rollblock::Value;
 use rollblock::{StoreFacade, StoreResult};
 
 use super::e2e_support::{
@@ -23,7 +24,14 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
     assert_eq!(applied, 0);
     assert_eq!(durable, 0);
 
-    apply_block(&store, 1, vec![Operation { key, value: 100 }])?;
+    apply_block(
+        &store,
+        1,
+        vec![Operation {
+            key,
+            value: 100.into(),
+        }],
+    )?;
     wait_for_durable(&store, 1, DEFAULT_TIMEOUT)?;
 
     let current = store.current_block()?;
@@ -35,7 +43,14 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
     assert_eq!(durable, 1);
     assert_eq!(value, 100);
 
-    apply_block(&store, 2, vec![Operation { key, value: 200 }])?;
+    apply_block(
+        &store,
+        2,
+        vec![Operation {
+            key,
+            value: 200.into(),
+        }],
+    )?;
     wait_for_durable(&store, 2, DEFAULT_TIMEOUT)?;
 
     let current = store.current_block()?;
@@ -47,7 +62,14 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
     assert_eq!(durable, 2);
     assert_eq!(value, 200);
 
-    apply_block(&store, 3, vec![Operation { key, value: 0 }])?;
+    apply_block(
+        &store,
+        3,
+        vec![Operation {
+            key,
+            value: Value::empty(),
+        }],
+    )?;
     wait_for_durable(&store, 3, DEFAULT_TIMEOUT)?;
 
     let current = store.current_block()?;
@@ -72,20 +94,34 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
 }
 
 #[test]
-fn e2e_zero_value_auto_delete() -> StoreResult<()> {
+fn e2e_empty_value_auto_delete() -> StoreResult<()> {
     init_tracing();
 
-    let harness = StoreHarness::builder("zero-value-auto-delete").build();
+    let harness = StoreHarness::builder("empty-value-auto-delete").build();
     let store = harness.open()?;
 
     let key = [2u8; 8];
 
-    apply_block(&store, 1, vec![Operation { key, value: 7 }])?;
+    apply_block(
+        &store,
+        1,
+        vec![Operation {
+            key,
+            value: 7.into(),
+        }],
+    )?;
     wait_for_durable(&store, 1, DEFAULT_TIMEOUT)?;
     let value = store.get(key)?;
     assert_eq!(value, 7);
 
-    apply_block(&store, 2, vec![Operation { key, value: 0 }])?;
+    apply_block(
+        &store,
+        2,
+        vec![Operation {
+            key,
+            value: Value::empty(),
+        }],
+    )?;
     wait_for_durable(&store, 2, DEFAULT_TIMEOUT)?;
 
     let current = store.current_block()?;
@@ -118,7 +154,7 @@ fn e2e_sparse_blocks() -> StoreResult<()> {
         100,
         vec![Operation {
             key: key_a,
-            value: 100,
+            value: 100.into(),
         }],
     )?;
     wait_for_durable(&store, 100, DEFAULT_TIMEOUT)?;
@@ -128,7 +164,7 @@ fn e2e_sparse_blocks() -> StoreResult<()> {
         500,
         vec![Operation {
             key: key_b,
-            value: 500,
+            value: 500.into(),
         }],
     )?;
     wait_for_durable(&store, 500, DEFAULT_TIMEOUT)?;
@@ -138,7 +174,7 @@ fn e2e_sparse_blocks() -> StoreResult<()> {
         1000,
         vec![Operation {
             key: key_c,
-            value: 1000,
+            value: 1000.into(),
         }],
     )?;
     wait_for_durable(&store, 1000, DEFAULT_TIMEOUT)?;
@@ -148,7 +184,7 @@ fn e2e_sparse_blocks() -> StoreResult<()> {
         1500,
         vec![Operation {
             key: key_a,
-            value: 1500,
+            value: 1500.into(),
         }],
     )?;
     wait_for_durable(&store, 1500, DEFAULT_TIMEOUT)?;
@@ -197,7 +233,7 @@ fn e2e_sparse_blocks() -> StoreResult<()> {
         4000,
         vec![Operation {
             key: key_d,
-            value: 4000,
+            value: 4000.into(),
         }],
     )?;
     wait_for_durable(&store, 4000, DEFAULT_TIMEOUT)?;
@@ -214,4 +250,30 @@ fn e2e_sparse_blocks() -> StoreResult<()> {
 
     store.close()?;
     Ok(())
+}
+
+#[test]
+fn get_returns_empty_vec_for_missing_keys() -> StoreResult<()> {
+    init_tracing();
+
+    let harness = StoreHarness::builder("missing-key-empty-value").build();
+    let store = harness.open()?;
+    let missing = store.get([0u8; 8])?;
+    assert!(missing.is_delete());
+    assert_eq!(missing.len(), 0);
+    store.close()?;
+    Ok(())
+}
+
+#[test]
+fn set_rejects_values_over_max_bytes() {
+    let oversized = vec![0u8; MAX_VALUE_BYTES + 1];
+    let err = Value::try_from_vec(oversized).unwrap_err();
+    match err {
+        rollblock::MhinStoreError::ValueTooLarge { actual, max } => {
+            assert_eq!(actual, MAX_VALUE_BYTES + 1);
+            assert_eq!(max, MAX_VALUE_BYTES);
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }

@@ -18,6 +18,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - `MhinStoreBlockFacade::end_block` now treats every failure as a fatal durability error: the staged block is dropped, the orchestrator is marked unhealthy, and all future operations return `MhinStoreError::DurabilityFailure` until the store is reopened. Documentation and tests cover the new behavior, plus a regression e2e test ensures `BlockIdNotIncreasing` halts the facade.
 - `StoreConfig::enable_remote_server()` now returns `StoreResult<StoreConfig>` and surfaces `MhinStoreError::RemoteServerConfigMissing` when the remote server settings were removed via `.without_remote_server()`, preventing a silent "enabled without parameters" state.
 - Snapshot scheduling now enforces a new `StoreConfig::max_snapshot_interval` (defaulting to the configured `snapshot_interval`). When asynchronous persistence runs under sustained load and queue drains never fully idle, the orchestrator blocks new writes long enough to flush pending work and force a snapshot so the journal cannot grow unbounded.
+- Values are now first-class byte payloads end-to-end: `MhinStoreBlockFacade` stages `HashMap<Key, Value>` entries (empty vectors mark deletes), metrics count deletes via `value.is_delete()`, and docs/tests were updated to spell out the 65,535-byte per-key limit plus the “missing ⇒ `Vec::new()`” convention.
+- The remote protocol streams `[len(u16)][value bytes]` per key directly to the socket, enforcing both `MAX_VALUE_BYTES` and total response caps without buffering the entire payload. `RemoteStoreClient::{get,get_one}` now return `Vec<Vec<u8>>`/`Vec<u8>` with empty vectors for missing keys, so callers see the raw bytes without the `Value` newtype.
 
 ## [0.2.0] - 2025-11-21
 

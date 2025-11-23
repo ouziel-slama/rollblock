@@ -4,7 +4,7 @@
 //! For JSON logs: RUST_LOG=rollblock=info cargo run --example observability
 
 use rollblock::metrics::HealthState;
-use rollblock::types::Operation;
+use rollblock::types::{Operation, Value};
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..10 {
         operations.push(Operation {
             key: [i, 0, 0, 0, 0, 0, 0, 0],
-            value: i as u64 * 100,
+            value: (i as u64 * 100).into(),
         });
     }
     store.set(1, operations)?;
@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..5 {
         operations.push(Operation {
             key: [i, 0, 0, 0, 0, 0, 0, 0],
-            value: i as u64 * 200,
+            value: (i as u64 * 200).into(),
         });
     }
     store.set(2, operations)?;
@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..3 {
         operations.push(Operation {
             key: [i, 0, 0, 0, 0, 0, 0, 0],
-            value: 0,
+            value: Value::empty(),
         });
     }
     store.set(3, operations)?;
@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             snapshot.operations_applied
         );
         println!(
-            "  • Sets: {} ({} zero-value deletes)",
+            "  • Sets: {} ({} empty-value deletes)",
             snapshot.set_operations_applied, snapshot.zero_value_deletes_applied
         );
         println!("  • Blocks committed: {}", snapshot.blocks_committed);
