@@ -383,7 +383,7 @@ where
                 values
                     .into_iter()
                     .map(Value::into_inner)
-                    .collect::<Vec<Vec<u8>>>()
+                    .collect::<Vec<Arc<[u8]>>>()
             })
         })
         .await
@@ -448,7 +448,7 @@ where
                 return Err(ConnectionError::Io);
             }
             if !value.is_empty() {
-                if let Err(err) = write_half.write_all(&value).await {
+                if let Err(err) = write_half.write_all(value.as_ref()).await {
                     tracing::warn!(?err, "failed to write value payload");
                     return Err(ConnectionError::Io);
                 }
