@@ -5,6 +5,7 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
+use rollblock::block_journal::SyncPolicy;
 use rollblock::error::MhinStoreError;
 use rollblock::orchestrator::{BlockOrchestrator, DefaultBlockOrchestrator};
 use rollblock::state_engine::ShardedStateEngine;
@@ -118,6 +119,65 @@ fn apply_and_revert_flow() {
     assert_eq!(orchestrator.fetch(key_a).unwrap(), 0);
     assert_eq!(orchestrator.fetch(key_b).unwrap(), 0);
     assert_eq!(metadata.current_block().unwrap(), 0);
+}
+
+#[test]
+fn rollback_discards_unsynced_relaxed_blocks() {
+    let tmp = tempdir();
+    let journal_path = tmp.path().join("journal");
+
+    let metadata = Arc::new(MemoryMetadataStore::new());
+    let journal = Arc::new(FileBlockJournal::new(&journal_path).unwrap());
+    let snapshotter = Arc::new(NoopSnapshotter);
+
+    let shards: Vec<Arc<dyn StateShard>> = (0..2)
+        .map(|index| Arc::new(RawTableShard::new(index, 32)) as Arc<dyn StateShard>)
+        .collect();
+
+    let engine = Arc::new(ShardedStateEngine::new(shards, Arc::clone(&metadata)));
+
+    let orchestrator = DefaultBlockOrchestrator::new(
+        engine,
+        journal,
+        snapshotter,
+        Arc::clone(&metadata),
+        synchronous_settings(),
+    )
+    .unwrap();
+
+    orchestrator.set_sync_policy(SyncPolicy::every_n_blocks(10));
+    orchestrator.set_metadata_sync_interval(10).unwrap();
+
+    let key = [0x11u8; 8];
+    orchestrator
+        .apply_operations(1, vec![operation(key, 10)])
+        .unwrap();
+    orchestrator
+        .apply_operations(2, vec![operation(key, 20)])
+        .unwrap();
+    orchestrator
+        .apply_operations(3, vec![operation(key, 30)])
+        .unwrap();
+
+    assert_eq!(
+        metadata.current_block().unwrap(),
+        1,
+        "metadata should only advance through the initial durable block while batching is enabled"
+    );
+    assert_eq!(orchestrator.fetch(key).unwrap(), 30);
+
+    orchestrator.revert_to(1).unwrap();
+
+    assert_eq!(orchestrator.fetch(key).unwrap(), 10);
+    assert_eq!(
+        metadata.current_block().unwrap(),
+        1,
+        "rollback should advance metadata to the requested height"
+    );
+    assert!(
+        !metadata.has_offset(2) && !metadata.has_offset(3),
+        "pending metadata for truncated blocks must be discarded"
+    );
 }
 
 #[test]

@@ -187,6 +187,32 @@ impl StoreConfig {
         self
     }
 
+    /// Configures the store to use relaxed async durability.
+    ///
+    /// This mode syncs to disk every `sync_every_n_blocks` blocks instead of every block,
+    /// significantly improving throughput at the cost of increased data loss window.
+    ///
+    /// # Arguments
+    /// * `max_pending_blocks` - Maximum blocks that can be queued for persistence
+    /// * `sync_every_n_blocks` - Number of blocks between fsync calls
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = StoreConfig::new("./data", 4, 1000, 1, false)
+    ///     .with_async_relaxed(1024, 100); // Sync every 100 blocks
+    /// ```
+    pub fn with_async_relaxed(
+        mut self,
+        max_pending_blocks: usize,
+        sync_every_n_blocks: usize,
+    ) -> Self {
+        self.durability_mode = DurabilityMode::AsyncRelaxed {
+            max_pending_blocks: max_pending_blocks.max(1),
+            sync_every_n_blocks: sync_every_n_blocks.max(1),
+        };
+        self
+    }
+
     /// Sets the LMDB map size in bytes.
     ///
     /// The map size determines the maximum size of the metadata database.

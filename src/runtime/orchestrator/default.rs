@@ -1,12 +1,13 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::block_journal::BlockJournal;
+use crate::block_journal::{BlockJournal, SyncPolicy};
 use crate::error::{MhinStoreError, StoreResult};
 use crate::metadata::MetadataStore;
 use crate::snapshot::Snapshotter;
 use crate::state_engine::StateEngine;
-use crate::types::{BlockId, BlockUndo, Key, Operation, Value};
+use crate::types::{BlockId, BlockUndo, JournalMeta, Key, Operation, Value};
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 use super::durability::PersistenceSettings;
@@ -29,6 +30,8 @@ where
     reader_gate: Shared<RwLock<()>>,
     persistence: PersistenceContext<E, J, S, M>,
     fatal_error: Mutex<Option<(BlockId, String)>>,
+    sync_metadata_interval: AtomicUsize,
+    pending_metadata: Mutex<Vec<(BlockId, JournalMeta)>>,
 }
 
 impl<E, J, S, M> DefaultBlockOrchestrator<E, J, S, M>
@@ -48,6 +51,8 @@ where
         let update_mutex = Shared::new(Mutex::new(()));
         let reader_gate = Shared::new(RwLock::new(()));
 
+        Self::apply_initial_sync_policy(&journal, &persistence_settings);
+
         let persistence = PersistenceContext::new(
             Arc::clone(&state_engine),
             Arc::clone(&journal),
@@ -56,6 +61,12 @@ where
             Arc::clone(&update_mutex),
             &persistence_settings,
         )?;
+
+        let initial_metadata_interval = if persistence.is_async() {
+            0
+        } else {
+            persistence_settings.durability_mode.sync_every_n_blocks()
+        };
 
         Ok(Self {
             state_engine,
@@ -66,7 +77,18 @@ where
             reader_gate,
             persistence,
             fatal_error: Mutex::new(None),
+            sync_metadata_interval: AtomicUsize::new(initial_metadata_interval),
+            pending_metadata: Mutex::new(Vec::new()),
         })
+    }
+
+    fn apply_initial_sync_policy(journal: &Arc<J>, settings: &PersistenceSettings) {
+        let sync_every_n = settings.durability_mode.sync_every_n_blocks();
+        if sync_every_n == 0 {
+            journal.set_sync_policy(SyncPolicy::EveryBlock);
+        } else {
+            journal.set_sync_policy(SyncPolicy::every_n_blocks(sync_every_n));
+        }
     }
 
     fn check_health(&self) -> StoreResult<()> {
@@ -87,6 +109,67 @@ where
                 block_height,
                 current,
             });
+        }
+
+        Ok(())
+    }
+
+    fn record_sync_metadata(
+        &self,
+        block_height: BlockId,
+        meta: &JournalMeta,
+        append_synced: bool,
+    ) -> StoreResult<()> {
+        if self.sync_metadata_interval.load(Ordering::Acquire) == 0 {
+            return self.metadata.record_block_commit(block_height, meta);
+        }
+
+        {
+            let mut pending = self.pending_metadata.lock();
+            pending.push((block_height, meta.clone()));
+        }
+
+        if append_synced {
+            self.flush_sync_pending_metadata()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn flush_sync_pending_metadata(&self) -> StoreResult<()> {
+        self.flush_sync_pending_metadata_through(BlockId::MAX)
+    }
+
+    fn flush_sync_pending_metadata_through(&self, block: BlockId) -> StoreResult<()> {
+        let entries = {
+            let mut guard = self.pending_metadata.lock();
+            if guard.is_empty() {
+                return Ok(());
+            }
+            let split = guard.partition_point(|(height, _)| *height <= block);
+            if split == 0 {
+                return Ok(());
+            }
+            guard.drain(..split).collect::<Vec<_>>()
+        };
+        self.metadata.record_block_commits(&entries)
+    }
+
+    fn discard_sync_pending_metadata_after(&self, block: BlockId) {
+        let mut guard = self.pending_metadata.lock();
+        guard.retain(|(height, _)| *height <= block);
+    }
+
+    fn revert_journal_range(&self, range_end: BlockId, range_start: BlockId) -> StoreResult<()> {
+        if range_start > range_end {
+            return Ok(());
+        }
+
+        let mut iter = self.journal.iter_backwards(range_end, range_start)?;
+        while let Some(result) = iter.next_entry() {
+            let entry = result?;
+            self.state_engine
+                .revert(entry.block_height, entry.undo.clone())?;
         }
 
         Ok(())
@@ -136,8 +219,10 @@ where
                 "Empty block, appending synchronous journal entry"
             );
             match self.journal.append(block_height, &block_undo, &[]) {
-                Ok(meta) => {
-                    if let Err(err) = self.metadata.record_block_commit(block_height, &meta) {
+                Ok(outcome) => {
+                    if let Err(err) =
+                        self.record_sync_metadata(block_height, &outcome.meta, outcome.synced)
+                    {
                         self.persistence.metrics().record_failure();
                         self.set_fatal_error(block_height, err.to_string());
                         self.journal
@@ -148,7 +233,9 @@ where
                             .ok();
                         return Err(err);
                     }
-                    self.persistence.set_durable_block(block_height);
+                    if outcome.synced {
+                        self.persistence.set_durable_block(block_height);
+                    }
                 }
                 Err(err) => {
                     self.persistence.metrics().record_failure();
@@ -254,11 +341,15 @@ where
         ops: &[Operation],
     ) -> StoreResult<()> {
         match self.journal.append(block_height, block_undo, ops) {
-            Ok(meta) => {
-                if let Err(err) = self.metadata.record_block_commit(block_height, &meta) {
+            Ok(outcome) => {
+                if let Err(err) =
+                    self.record_sync_metadata(block_height, &outcome.meta, outcome.synced)
+                {
                     Err(err)
                 } else {
-                    self.persistence.set_durable_block(block_height);
+                    if outcome.synced {
+                        self.persistence.set_durable_block(block_height);
+                    }
                     Ok(())
                 }
             }
@@ -352,45 +443,38 @@ where
             }
         }
 
-        current_durable = self.persistence.durable_block_height();
-        if block > current_durable {
-            self.persistence
-                .update_key_count(self.state_engine.total_keys());
-            self.persistence.set_applied_block(block);
-            return Ok(());
-        }
-
-        let actual_target = self
+        let highest_committed_before_flush = self
             .metadata
-            .last_journal_offset_at_or_before(block)?
+            .last_journal_offset_at_or_before(BlockId::MAX)?
             .map(|meta| meta.block_height)
             .unwrap_or(0);
 
-        let range_start = actual_target.saturating_add(1);
-        current_durable = self.persistence.durable_block_height();
-        let revert_offsets = if range_start <= current_durable {
-            self.metadata
-                .get_journal_offsets(range_start..=current_durable)?
-        } else {
-            Vec::new()
-        };
-
-        if !revert_offsets.is_empty() {
-            let mut iter = self.journal.iter_backwards(current_durable, range_start)?;
-
-            while let Some(result) = iter.next_entry() {
-                let entry = result?;
-                self.state_engine
-                    .revert(entry.block_height, entry.undo.clone())?;
-            }
+        let revert_floor = block.saturating_add(1);
+        let non_durable_start = highest_committed_before_flush
+            .saturating_add(1)
+            .max(revert_floor);
+        if non_durable_start <= current_applied {
+            self.revert_journal_range(current_applied, non_durable_start)?;
         }
 
-        self.journal.truncate_after(actual_target)?;
-        self.metadata.remove_journal_offsets_after(actual_target)?;
+        let committed_ceiling = highest_committed_before_flush.min(current_applied);
+        if revert_floor <= committed_ceiling {
+            self.revert_journal_range(committed_ceiling, revert_floor)?;
+        }
+
+        self.journal.truncate_after(block)?;
+        self.metadata.remove_journal_offsets_after(block)?;
+        self.discard_sync_pending_metadata_after(block);
+        self.persistence.discard_pending_metadata_after(block);
+        self.journal.force_sync()?;
+        self.flush_sync_pending_metadata_through(block)?;
+        self.persistence.flush_pending_metadata_through(block)?;
 
         self.metadata.set_current_block(block)?;
-        self.snapshotter.prune_snapshots_after(actual_target)?;
-        self.persistence.set_durable_block(actual_target);
+        self.snapshotter.prune_snapshots_after(block)?;
+        current_durable = self.persistence.durable_block_height();
+        let new_durable = current_durable.min(block);
+        self.persistence.set_durable_block(new_durable);
         self.persistence.set_applied_block(block);
 
         self.persistence
@@ -428,6 +512,7 @@ where
                 "Failed to reset metadata current block after synchronous durability failure"
             );
         }
+        self.discard_sync_pending_metadata_after(durable);
         self.persistence.set_applied_block(durable);
     }
 
@@ -553,6 +638,9 @@ where
         self.check_health()?;
         let _reader_guard = self.reader_gate.write();
         self.persistence.flush()?;
+        if !self.persistence.is_async() {
+            self.flush_sync_pending_metadata()?;
+        }
 
         let durable_block = self.persistence.durable_block_height();
         self.persistence.set_applied_block(durable_block);
@@ -570,7 +658,7 @@ where
             "Snapshot created successfully"
         );
 
-        self.persistence.shutdown();
+        self.persistence.shutdown()?;
 
         Ok(())
     }
@@ -581,5 +669,32 @@ where
 
     fn record_fatal_error(&self, block: BlockId, reason: String) {
         self.set_fatal_error(block, reason);
+    }
+
+    fn set_sync_policy(&self, policy: crate::block_journal::SyncPolicy) {
+        self.journal.set_sync_policy(policy);
+    }
+
+    fn set_metadata_sync_interval(&self, sync_every_n_blocks: usize) -> StoreResult<()> {
+        if !self.persistence.is_async() {
+            self.sync_metadata_interval
+                .store(sync_every_n_blocks, Ordering::Release);
+            if sync_every_n_blocks == 0 {
+                self.journal.force_sync()?;
+                self.flush_sync_pending_metadata()?;
+            }
+        }
+        self.persistence
+            .set_metadata_sync_interval(sync_every_n_blocks)
+    }
+
+    fn flush(&self) -> StoreResult<()> {
+        self.check_health()?;
+        let _update_guard = self.update_mutex.lock();
+        self.persistence.flush()?;
+        if !self.persistence.is_async() {
+            self.flush_sync_pending_metadata()?;
+        }
+        Ok(())
     }
 }

@@ -101,7 +101,7 @@ User → Facade.set(block_height, ops)
     → Validation: block_height > current_block
     → StateEngine.prepare_journal(block_height, ops) → BlockDelta
     → StateEngine.commit(block_height, delta) → BlockUndo
-    → BlockJournal.append(block_height, undo, ops) → JournalMeta
+    → BlockJournal.append(block_height, undo, ops) → JournalAppendOutcome
     → Metadata.put_journal_offset(block_height, meta)
     → Metadata.set_current_block(block_height)
 ```

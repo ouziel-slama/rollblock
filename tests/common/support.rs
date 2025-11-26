@@ -8,12 +8,14 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::Duration;
 
-use rollblock::block_journal::{BlockJournal, JournalBlock, JournalIter};
+use rollblock::block_journal::{
+    BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, SyncPolicy,
+};
 use rollblock::error::{MhinStoreError, StoreResult};
 use rollblock::metadata::MetadataStore;
 use rollblock::snapshot::Snapshotter;
 use rollblock::state_shard::StateShard;
-use rollblock::types::{BlockId, JournalMeta, Key, Operation, Value};
+use rollblock::types::{BlockId, BlockUndo, JournalMeta, Key, Operation, Value};
 use rollblock::FileBlockJournal;
 static INIT_TESTDATA_ROOT: Once = Once::new();
 use tempfile::{tempdir_in, TempDir};
@@ -85,6 +87,17 @@ impl MetadataStore for MemoryMetadataStore {
 
         let offsets = self.offsets.lock().unwrap();
         Ok(offsets.range(range).map(|(_, meta)| meta.clone()).collect())
+    }
+
+    fn remove_journal_offsets_after(&self, block: BlockId) -> StoreResult<()> {
+        if block == BlockId::MAX {
+            return Ok(());
+        }
+
+        let mut offsets = self.offsets.lock().unwrap();
+        let start = block.saturating_add(1);
+        let _ = offsets.split_off(&start);
+        Ok(())
     }
 }
 
@@ -199,7 +212,7 @@ impl BlockJournal for FlakyJournal {
         block: BlockId,
         undo: &rollblock::types::BlockUndo,
         operations: &[Operation],
-    ) -> StoreResult<JournalMeta> {
+    ) -> StoreResult<JournalAppendOutcome> {
         if block == self.fail_block {
             let mut failed = self.failed.lock().unwrap();
             if !*failed {
@@ -236,6 +249,14 @@ impl BlockJournal for FlakyJournal {
     fn scan_entries(&self) -> StoreResult<Vec<JournalMeta>> {
         self.inner.scan_entries()
     }
+
+    fn force_sync(&self) -> StoreResult<()> {
+        self.inner.force_sync()
+    }
+
+    fn set_sync_policy(&self, policy: SyncPolicy) {
+        self.inner.set_sync_policy(policy);
+    }
 }
 
 pub struct SlowJournal {
@@ -264,7 +285,7 @@ impl BlockJournal for SlowJournal {
         block: BlockId,
         undo: &rollblock::types::BlockUndo,
         operations: &[Operation],
-    ) -> StoreResult<JournalMeta> {
+    ) -> StoreResult<JournalAppendOutcome> {
         let should_delay = {
             let guard = self.slow_blocks.lock().unwrap();
             guard.contains(&block)
@@ -297,6 +318,14 @@ impl BlockJournal for SlowJournal {
 
     fn scan_entries(&self) -> StoreResult<Vec<JournalMeta>> {
         self.inner.scan_entries()
+    }
+
+    fn force_sync(&self) -> StoreResult<()> {
+        self.inner.force_sync()
+    }
+
+    fn set_sync_policy(&self, policy: SyncPolicy) {
+        self.inner.set_sync_policy(policy);
     }
 }
 
@@ -348,5 +377,94 @@ pub fn async_settings(max_pending_blocks: usize) -> PersistenceSettings {
         durability_mode: DurabilityMode::Async { max_pending_blocks },
         snapshot_interval: Duration::from_secs(3600),
         max_snapshot_interval: Duration::from_secs(3600),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_undo(block: BlockId) -> BlockUndo {
+        BlockUndo {
+            block_height: block,
+            shard_undos: Vec::new(),
+        }
+    }
+
+    fn verify_journal_sync_forwarding<J: BlockJournal>(journal: &J) {
+        journal.set_sync_policy(SyncPolicy::every_n_blocks(3));
+
+        // First append must sync to ensure a brand-new journal is durable before batching kicks in.
+        let first_outcome = journal
+            .append(1, &empty_undo(1), &[operation([1u8; 8], 10)])
+            .expect("first append should succeed");
+        assert!(
+            first_outcome.synced,
+            "first append to a new journal must always sync for durability"
+        );
+
+        for block in 2..=2 {
+            let outcome = journal
+                .append(
+                    block,
+                    &empty_undo(block),
+                    &[operation([block as u8; 8], block * 10)],
+                )
+                .expect("append should succeed");
+            assert!(
+                !outcome.synced,
+                "every_n_blocks should skip sync until counter threshold"
+            );
+        }
+
+        let outcome = journal
+            .append(3, &empty_undo(3), &[operation([3u8; 8], 30)])
+            .expect("append should succeed at threshold");
+        assert!(
+            outcome.synced,
+            "counter threshold must trigger sync via forwarded policy"
+        );
+
+        journal.set_sync_policy(SyncPolicy::EveryBlock);
+        let outcome = journal
+            .append(4, &empty_undo(4), &[operation([4u8; 8], 40)])
+            .expect("append should sync every block");
+        assert!(outcome.synced, "every block policy must sync every append");
+
+        journal.set_sync_policy(SyncPolicy::every_n_blocks(5));
+        let outcome = journal
+            .append(5, &empty_undo(5), &[operation([5u8; 8], 50)])
+            .expect("append should succeed under relaxed mode");
+        assert!(
+            !outcome.synced,
+            "relaxed mode should defer sync until force_sync/reset"
+        );
+
+        journal.force_sync().expect("force_sync should succeed");
+        let outcome = journal
+            .append(6, &empty_undo(6), &[operation([6u8; 8], 60)])
+            .expect("append after force_sync should succeed");
+        assert!(
+            outcome.synced,
+            "force_sync must reset counter so next append syncs"
+        );
+    }
+
+    #[test]
+    fn flaky_journal_forwards_runtime_sync_controls() {
+        let tmp = tempdir();
+        let journal = FlakyJournal::new(FileBlockJournal::new(tmp.path()).unwrap(), 9999);
+        verify_journal_sync_forwarding(&journal);
+    }
+
+    #[test]
+    fn slow_journal_forwards_runtime_sync_controls() {
+        let tmp = tempdir();
+        let journal = SlowJournal::new(
+            FileBlockJournal::new(tmp.path()).unwrap(),
+            [],
+            Duration::ZERO,
+        );
+        verify_journal_sync_forwarding(&journal);
     }
 }

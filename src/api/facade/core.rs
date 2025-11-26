@@ -1,16 +1,17 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::block_journal::{FileBlockJournal, JournalOptions};
+use crate::block_journal::{FileBlockJournal, JournalOptions, SyncPolicy};
 use crate::error::{MhinStoreError, StoreResult};
 use crate::metadata::LmdbMetadataStore;
 use crate::net::{RemoteServerHandle, RemoteStoreServer, ServerError, ServerMetricsSnapshot};
-use crate::orchestrator::{BlockOrchestrator, DefaultBlockOrchestrator};
+use crate::orchestrator::{BlockOrchestrator, DefaultBlockOrchestrator, DurabilityMode};
 use crate::snapshot::MmapSnapshotter;
 use crate::state_engine::ShardedStateEngine;
 use crate::state_shard::{RawTableShard, StateShard};
 use crate::store_lock::StoreLockGuard;
 use crate::types::{BlockId, Key, Operation, Value};
+use parking_lot::RwLock;
 use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -28,6 +29,8 @@ use super::StoreFacade;
 /// the lifecycle of internal components and provides a thread-safe interface.
 pub struct MhinStoreFacade {
     orchestrator: Arc<dyn BlockOrchestrator>,
+    metadata: Option<Arc<LmdbMetadataStore>>,
+    durability_mode: Arc<RwLock<DurabilityMode>>,
     lock: Option<Arc<StoreLockGuard>>,
     shutdown_state: Arc<AtomicBool>,
     handle_count: Arc<AtomicUsize>,
@@ -39,6 +42,8 @@ impl Clone for MhinStoreFacade {
         self.handle_count.fetch_add(1, Ordering::AcqRel);
         Self {
             orchestrator: Arc::clone(&self.orchestrator),
+            metadata: self.metadata.clone(),
+            durability_mode: Arc::clone(&self.durability_mode),
             lock: self.lock.clone(),
             shutdown_state: Arc::clone(&self.shutdown_state),
             handle_count: Arc::clone(&self.handle_count),
@@ -85,9 +90,35 @@ impl MhinStoreFacade {
             config.metadata_dir(),
             config.lmdb_map_size,
         )?);
+        match metadata.load_durability_mode()? {
+            Some(stored) if stored != config.durability_mode => {
+                // Config always wins over stored value - user explicitly requested a different mode
+                tracing::info!(
+                    stored_mode = ?stored,
+                    configured_mode = ?config.durability_mode,
+                    "Configured durability mode overrides stored value; persisting new setting"
+                );
+                metadata.store_durability_mode(&config.durability_mode)?;
+            }
+            Some(_) => {}
+            None => {
+                metadata.store_durability_mode(&config.durability_mode)?;
+            }
+        }
+        let sync_policy = match &config.durability_mode {
+            crate::orchestrator::DurabilityMode::AsyncRelaxed {
+                sync_every_n_blocks,
+                ..
+            }
+            | crate::orchestrator::DurabilityMode::SynchronousRelaxed {
+                sync_every_n_blocks,
+            } => SyncPolicy::every_n_blocks(*sync_every_n_blocks),
+            _ => SyncPolicy::default(),
+        };
         let journal_options = JournalOptions {
             compress: config.compress_journal,
             compression_level: config.journal_compression_level,
+            sync_policy,
         };
         let journal = Arc::new(FileBlockJournal::with_options(
             config.journal_dir(),
@@ -135,14 +166,6 @@ impl MhinStoreFacade {
             restored_block,
         )?;
 
-        if metadata
-            .load_durability_mode()?
-            .map(|stored| stored != config.durability_mode)
-            .unwrap_or(true)
-        {
-            metadata.store_durability_mode(&config.durability_mode)?;
-        }
-
         let persistence_settings = crate::orchestrator::PersistenceSettings {
             durability_mode: config.durability_mode.clone(),
             snapshot_interval: config.snapshot_interval,
@@ -153,12 +176,16 @@ impl MhinStoreFacade {
             Arc::clone(&engine),
             journal,
             snapshotter,
-            metadata,
+            Arc::clone(&metadata),
             persistence_settings,
         )?);
 
+        let durability_mode = Arc::new(RwLock::new(config.durability_mode.clone()));
+
         let mut store = Self {
             orchestrator,
+            metadata: Some(metadata),
+            durability_mode,
             lock: Some(lock),
             shutdown_state: Arc::new(AtomicBool::new(false)),
             handle_count: Arc::new(AtomicUsize::new(1)),
@@ -184,6 +211,8 @@ impl MhinStoreFacade {
     pub fn from_orchestrator(orchestrator: Arc<dyn BlockOrchestrator>) -> Self {
         Self {
             orchestrator,
+            metadata: None,
+            durability_mode: Arc::new(RwLock::new(DurabilityMode::default())),
             lock: None,
             shutdown_state: Arc::new(AtomicBool::new(false)),
             handle_count: Arc::new(AtomicUsize::new(1)),
@@ -260,6 +289,127 @@ impl MhinStoreFacade {
         self.orchestrator.durable_block_height()
     }
 
+    /// Returns true if relaxed durability semantics are currently active.
+    pub fn relaxed_mode_enabled(&self) -> bool {
+        self.durability_mode.read().is_relaxed()
+    }
+
+    /// Disables relaxed durability so every block is synced immediately again.
+    ///
+    /// Use this when approaching the chain tip where data loss would be more critical.
+    /// This keeps the original async/sync persistence mode, but forces the journal to
+    /// fsync after each append (no batching).
+    ///
+    /// This method also flushes any pending writes that were buffered under relaxed mode,
+    /// ensuring all previously written blocks are durable before returning.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // During initial sync, use relaxed mode for speed
+    /// // When approaching tip:
+    /// if chain_tip - current_block < 10 {
+    ///     store.disable_relaxed_mode()?;
+    /// }
+    /// ```
+    pub fn disable_relaxed_mode(&self) -> StoreResult<()> {
+        self.orchestrator.set_sync_policy(SyncPolicy::EveryBlock);
+        // Flush pending journal/index writes before claiming metadata is durable
+        self.orchestrator.flush()?;
+        self.orchestrator.set_metadata_sync_interval(0)?;
+
+        let updated_mode = {
+            let mut guard = self.durability_mode.write();
+            match &*guard {
+                DurabilityMode::SynchronousRelaxed { .. } => {
+                    *guard = DurabilityMode::Synchronous;
+                    Some(DurabilityMode::Synchronous)
+                }
+                DurabilityMode::AsyncRelaxed {
+                    max_pending_blocks, ..
+                } => {
+                    let updated = DurabilityMode::Async {
+                        max_pending_blocks: (*max_pending_blocks).max(1),
+                    };
+                    *guard = updated.clone();
+                    Some(updated)
+                }
+                _ => None,
+            }
+        };
+
+        if let Some(mode) = updated_mode.as_ref() {
+            self.persist_durability_mode(mode)?;
+        }
+
+        tracing::info!(
+            relaxed_mode_previously_enabled = updated_mode.is_some(),
+            "Relaxed durability disabled; syncing every block"
+        );
+        Ok(())
+    }
+
+    /// Enables relaxed durability where syncs happen every N blocks.
+    ///
+    /// This significantly improves throughput during initial sync or catch-up,
+    /// but increases the window of potential data loss in case of crash.
+    ///
+    /// # Arguments
+    /// * `sync_every_n_blocks` - Number of blocks between fsync calls (minimum 1)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // For initial blockchain sync:
+    /// store.enable_relaxed_mode(100)?; // Sync every 100 blocks
+    /// ```
+    pub fn enable_relaxed_mode(&self, sync_every_n_blocks: usize) -> StoreResult<()> {
+        let n = sync_every_n_blocks.max(1);
+        // Enable metadata batching before loosening the journal policy so we never
+        // advertise durability for blocks that have not reached disk yet.
+        self.orchestrator.set_metadata_sync_interval(n)?;
+        self.orchestrator
+            .set_sync_policy(SyncPolicy::every_n_blocks(n));
+
+        let new_mode = {
+            let mut guard = self.durability_mode.write();
+            let updated = match &*guard {
+                DurabilityMode::Synchronous | DurabilityMode::SynchronousRelaxed { .. } => {
+                    DurabilityMode::SynchronousRelaxed {
+                        sync_every_n_blocks: n,
+                    }
+                }
+                DurabilityMode::Async { max_pending_blocks }
+                | DurabilityMode::AsyncRelaxed {
+                    max_pending_blocks, ..
+                } => DurabilityMode::AsyncRelaxed {
+                    max_pending_blocks: (*max_pending_blocks).max(1),
+                    sync_every_n_blocks: n,
+                },
+            };
+            *guard = updated.clone();
+            updated
+        };
+
+        self.persist_durability_mode(&new_mode)?;
+
+        tracing::info!(
+            sync_every_n_blocks = n,
+            "Switched to relaxed durability mode"
+        );
+        Ok(())
+    }
+
+    fn persist_durability_mode(&self, mode: &DurabilityMode) -> StoreResult<()> {
+        if let Some(metadata) = &self.metadata {
+            if let Err(err) = metadata.store_durability_mode(mode) {
+                let block = self.orchestrator.applied_block_height();
+                let reason = format!("failed to persist durability mode {:?}: {}", mode, err);
+                self.orchestrator.record_fatal_error(block, reason);
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
     /// Flushes all in-memory state and closes the store gracefully.
     pub fn close(&self) -> StoreResult<()> {
         if self
@@ -294,6 +444,8 @@ impl MhinStoreFacade {
     ) -> Self {
         Self {
             orchestrator,
+            metadata: None,
+            durability_mode: Arc::new(RwLock::new(DurabilityMode::default())),
             lock: None,
             shutdown_state,
             handle_count,
@@ -320,6 +472,18 @@ impl StoreFacade for MhinStoreFacade {
 
     fn multi_get(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
         self.orchestrator.fetch_many(keys)
+    }
+
+    fn enable_relaxed_mode(&self, sync_every_n_blocks: usize) -> StoreResult<()> {
+        MhinStoreFacade::enable_relaxed_mode(self, sync_every_n_blocks)
+    }
+
+    fn relaxed_mode_enabled(&self) -> bool {
+        MhinStoreFacade::relaxed_mode_enabled(self)
+    }
+
+    fn disable_relaxed_mode(&self) -> StoreResult<()> {
+        MhinStoreFacade::disable_relaxed_mode(self)
     }
 
     fn close(&self) -> StoreResult<()> {

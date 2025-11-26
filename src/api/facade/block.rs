@@ -194,6 +194,21 @@ impl MhinStoreBlockFacade {
         &self.inner
     }
 
+    /// Enables relaxed durability by delegating to the underlying facade.
+    pub fn enable_relaxed_mode(&self, sync_every_n_blocks: usize) -> StoreResult<()> {
+        self.inner.enable_relaxed_mode(sync_every_n_blocks)
+    }
+
+    /// Returns whether the underlying facade currently runs in relaxed mode.
+    pub fn relaxed_mode_enabled(&self) -> bool {
+        self.inner.relaxed_mode_enabled()
+    }
+
+    /// Disables relaxed durability and flushes pending writes.
+    pub fn disable_relaxed_mode(&self) -> StoreResult<()> {
+        self.inner.disable_relaxed_mode()
+    }
+
     /// Checks the health of the underlying store without performing an operation.
     pub fn ensure_healthy(&self) -> StoreResult<()> {
         self.inner.ensure_healthy()
@@ -272,6 +287,18 @@ impl StoreFacade for MhinStoreBlockFacade {
         }
 
         Ok(results)
+    }
+
+    fn enable_relaxed_mode(&self, sync_every_n_blocks: usize) -> StoreResult<()> {
+        self.inner.enable_relaxed_mode(sync_every_n_blocks)
+    }
+
+    fn relaxed_mode_enabled(&self) -> bool {
+        self.inner.relaxed_mode_enabled()
+    }
+
+    fn disable_relaxed_mode(&self) -> StoreResult<()> {
+        self.inner.disable_relaxed_mode()
     }
 
     fn close(&self) -> StoreResult<()> {

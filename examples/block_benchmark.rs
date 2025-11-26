@@ -143,6 +143,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let scenarios = vec![
         Scenario {
+            name: "Async relaxed, multi-threads",
+            data_dir: "./data/block_benchmark_async_relaxed_parallel",
+            thread_count: PARALLEL_THREAD_COUNT,
+            durability_mode: DurabilityMode::AsyncRelaxed {
+                max_pending_blocks: 1024,
+                sync_every_n_blocks: 100,
+            },
+        },
+        Scenario {
             name: REFERENCE_SCENARIO_NAME,
             data_dir: "./data/block_benchmark_async_parallel",
             thread_count: PARALLEL_THREAD_COUNT,

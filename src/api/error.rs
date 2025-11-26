@@ -117,4 +117,7 @@ pub enum MhinStoreError {
 
     #[error("value payload of {actual} bytes exceeds the {max}-byte limit")]
     ValueTooLarge { actual: usize, max: usize },
+
+    #[error("unsupported operation: {reason}")]
+    UnsupportedOperation { reason: String },
 }

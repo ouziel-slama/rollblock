@@ -7,7 +7,9 @@ pub mod snapshot;
 
 pub mod prelude {
     pub use super::fs::store_lock::StoreLockGuard;
-    pub use super::journal::{BlockJournal, FileBlockJournal, JournalBlock, JournalIter};
+    pub use super::journal::{
+        BlockJournal, FileBlockJournal, JournalBlock, JournalIter, JournalOptions, SyncPolicy,
+    };
     pub use super::metadata::{LmdbMetadataStore, MetadataStore, ShardLayout};
     pub use super::snapshot::{MmapSnapshotter, Snapshotter};
 }

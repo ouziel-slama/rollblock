@@ -1,20 +1,93 @@
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rollblock::block_journal::BlockJournal;
+use rollblock::block_journal::{
+    BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, SyncPolicy,
+};
 use rollblock::error::MhinStoreError;
-use rollblock::orchestrator::{BlockOrchestrator, DefaultBlockOrchestrator};
+use rollblock::orchestrator::{
+    BlockOrchestrator, DefaultBlockOrchestrator, DurabilityMode, PersistenceSettings,
+};
 use rollblock::state_engine::ShardedStateEngine;
 use rollblock::state_shard::{RawTableShard, StateShard};
+use rollblock::types::{BlockId, JournalMeta, Operation};
 use rollblock::FileBlockJournal;
 use rollblock::MetadataStore;
+use rollblock::StoreResult;
 
 use super::support::{
     async_settings, operation, synchronous_settings, tempdir, wait_for_block, FailingMetadataStore,
     FlakyJournal, MemoryMetadataStore, NoopSnapshotter, SlowJournal, SlowSnapshotter,
 };
+
+struct RecordingJournal {
+    inner: FileBlockJournal,
+    last_policy: Mutex<Option<usize>>,
+}
+
+impl RecordingJournal {
+    fn new(inner: FileBlockJournal) -> Self {
+        Self {
+            inner,
+            last_policy: Mutex::new(None),
+        }
+    }
+
+    fn last_policy(&self) -> Option<usize> {
+        *self.last_policy.lock().unwrap()
+    }
+}
+
+impl BlockJournal for RecordingJournal {
+    fn append(
+        &self,
+        block: BlockId,
+        undo: &rollblock::types::BlockUndo,
+        operations: &[Operation],
+    ) -> StoreResult<JournalAppendOutcome> {
+        self.inner.append(block, undo, operations)
+    }
+
+    fn iter_backwards(&self, from: BlockId, to: BlockId) -> StoreResult<JournalIter> {
+        self.inner.iter_backwards(from, to)
+    }
+
+    fn read_entry(&self, meta: &JournalMeta) -> StoreResult<JournalBlock> {
+        self.inner.read_entry(meta)
+    }
+
+    fn list_entries(&self) -> StoreResult<Vec<JournalMeta>> {
+        self.inner.list_entries()
+    }
+
+    fn truncate_after(&self, block: BlockId) -> StoreResult<()> {
+        self.inner.truncate_after(block)
+    }
+
+    fn rewrite_index(&self, metas: &[JournalMeta]) -> StoreResult<()> {
+        self.inner.rewrite_index(metas)
+    }
+
+    fn scan_entries(&self) -> StoreResult<Vec<JournalMeta>> {
+        self.inner.scan_entries()
+    }
+
+    fn force_sync(&self) -> StoreResult<()> {
+        self.inner.force_sync()
+    }
+
+    fn set_sync_policy(&self, policy: SyncPolicy) {
+        let mut last = self.last_policy.lock().unwrap();
+        *last = match &policy {
+            SyncPolicy::EveryBlock => None,
+            SyncPolicy::EveryNBlocks { n, .. } => Some(*n),
+            SyncPolicy::Manual => Some(0),
+        };
+        self.inner.set_sync_policy(policy);
+    }
+}
 
 #[test]
 fn async_persistence_failure_is_fatal() {
@@ -412,6 +485,48 @@ fn async_rollback_discarded_inflight_persistence_is_skipped() {
     assert!(entries.iter().all(|meta| meta.block_height <= 2));
 
     orchestrator.shutdown().unwrap();
+}
+
+#[test]
+fn default_orchestrator_applies_relaxed_policy_from_settings() {
+    let tmp = tempdir();
+    let journal_path = tmp.path().join("journal");
+
+    let metadata = Arc::new(MemoryMetadataStore::new());
+    let recording = Arc::new(RecordingJournal::new(
+        FileBlockJournal::new(&journal_path).unwrap(),
+    ));
+    let snapshotter = Arc::new(NoopSnapshotter);
+
+    let shards: Vec<Arc<dyn StateShard>> = (0..2)
+        .map(|index| Arc::new(RawTableShard::new(index, 32)) as Arc<dyn StateShard>)
+        .collect();
+
+    let engine = Arc::new(ShardedStateEngine::new(shards, Arc::clone(&metadata)));
+
+    let persistence_settings = PersistenceSettings {
+        durability_mode: DurabilityMode::AsyncRelaxed {
+            max_pending_blocks: 16,
+            sync_every_n_blocks: 7,
+        },
+        snapshot_interval: Duration::from_secs(3600),
+        max_snapshot_interval: Duration::from_secs(3600),
+    };
+
+    DefaultBlockOrchestrator::new(
+        Arc::clone(&engine),
+        Arc::clone(&recording),
+        snapshotter,
+        Arc::clone(&metadata),
+        persistence_settings,
+    )
+    .unwrap();
+
+    assert_eq!(
+        recording.last_policy(),
+        Some(7),
+        "orchestrator should propagate relaxed policy to journal"
+    );
 }
 
 #[test]

@@ -113,6 +113,13 @@ let config = StoreConfig::new(
 .with_durability_mode(DurabilityMode::Async {
     max_pending_blocks: 4_096,
 });
+
+> **Note:** Runtime toggles such as `store.enable_relaxed_mode(...)` or
+> `store.disable_relaxed_mode()` are not persisted automatically. The next
+> startup always uses the `durability_mode` declared in `StoreConfig`
+> (or `StoreHarness::builder(...).durability_mode(...)` in tests), even if you
+> switched modes while the process was running. Update the config before
+> restarting if you want a relaxed mode change to survive restarts.
 ```
 
 **Why these values?**

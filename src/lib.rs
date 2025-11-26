@@ -90,6 +90,8 @@ pub use runtime::orchestrator::{
 pub use state::engine::{ShardedStateEngine, StateEngine};
 pub use state::shard::{RawTableShard, StateShard};
 pub use storage::fs::store_lock::StoreLockGuard;
-pub use storage::journal::{BlockJournal, FileBlockJournal, JournalBlock, JournalIter};
+pub use storage::journal::{
+    BlockJournal, FileBlockJournal, JournalBlock, JournalIter, JournalOptions, SyncPolicy,
+};
 pub use storage::metadata::{LmdbMetadataStore, MetadataStore, ShardLayout};
 pub use storage::snapshot::{MmapSnapshotter, Snapshotter};

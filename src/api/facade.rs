@@ -8,7 +8,7 @@ mod recovery;
 #[cfg(test)]
 mod tests;
 
-use crate::error::StoreResult;
+use crate::error::{MhinStoreError, StoreResult};
 use crate::types::{BlockId, Key, Operation, Value};
 
 pub use block::MhinStoreBlockFacade;
@@ -90,6 +90,24 @@ pub trait StoreFacade: Send + Sync {
     /// are represented by `Value::empty()` in the returned vector.
     fn multi_get(&self, keys: &[Key]) -> StoreResult<Vec<Value>>;
 
+    /// Enables relaxed durability by syncing every N blocks instead of every block.
+    ///
+    /// This improves throughput during long catch-up phases at the cost of a larger
+    /// potential data-loss window if the process crashes.
+    fn enable_relaxed_mode(&self, _sync_every_n_blocks: usize) -> StoreResult<()> {
+        relaxed_mode_not_supported()
+    }
+
+    /// Returns `true` when relaxed durability is currently enabled.
+    fn relaxed_mode_enabled(&self) -> bool {
+        false
+    }
+
+    /// Disables relaxed durability and forces pending writes to become durable immediately.
+    fn disable_relaxed_mode(&self) -> StoreResult<()> {
+        relaxed_mode_not_supported()
+    }
+
     /// Flushes in-memory state and closes the store gracefully.
     fn close(&self) -> StoreResult<()>;
 
@@ -106,4 +124,10 @@ pub trait StoreFacade: Send + Sync {
     ///
     /// Useful for long idle periods between operations when using asynchronous durability.
     fn ensure_healthy(&self) -> StoreResult<()>;
+}
+
+fn relaxed_mode_not_supported() -> StoreResult<()> {
+    Err(MhinStoreError::UnsupportedOperation {
+        reason: "relaxed durability mode is not supported by this StoreFacade".to_string(),
+    })
 }

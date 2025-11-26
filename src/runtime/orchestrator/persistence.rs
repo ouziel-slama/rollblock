@@ -37,6 +37,7 @@ where
     S: Snapshotter + 'static,
     M: MetadataStore + 'static,
 {
+    journal: Arc<J>,
     metrics: StoreMetrics,
     pending_blocks: Arc<PendingBlocks>,
     durable_block: Arc<AtomicU64>,
@@ -97,6 +98,7 @@ where
                 Arc::clone(&applied_block),
                 Arc::clone(&rollback_barrier),
                 Arc::clone(&update_mutex),
+                settings.durability_mode.sync_every_n_blocks(),
                 settings.snapshot_interval,
                 settings.max_snapshot_interval,
             ))
@@ -105,6 +107,7 @@ where
         };
 
         Ok(Self {
+            journal,
             metrics,
             pending_blocks,
             durable_block,
@@ -166,6 +169,13 @@ where
         }
     }
 
+    pub fn set_metadata_sync_interval(&self, sync_every_n_blocks: usize) -> StoreResult<()> {
+        match &self.runtime {
+            Some(runtime) => runtime.set_metadata_sync_interval(sync_every_n_blocks),
+            None => Ok(()),
+        }
+    }
+
     pub fn cancel_after(&self, block_height: BlockId) -> Vec<Arc<PersistenceTask>> {
         match &self.runtime {
             Some(runtime) => runtime.cancel_after(block_height),
@@ -173,10 +183,30 @@ where
         }
     }
 
+    pub fn discard_pending_metadata_after(&self, block_height: BlockId) {
+        if let Some(runtime) = &self.runtime {
+            runtime.discard_pending_metadata_after(block_height);
+        }
+    }
+
+    pub fn flush_pending_metadata_through(&self, block_height: BlockId) -> StoreResult<()> {
+        match &self.runtime {
+            Some(runtime) => runtime.flush_pending_metadata_through(block_height),
+            None => Ok(()),
+        }
+    }
+
     pub fn flush(&self) -> StoreResult<()> {
         match &self.runtime {
             Some(runtime) => runtime.flush(),
-            None => Ok(()),
+            None => {
+                self.journal.force_sync()?;
+                let applied = self.applied_block.load(Ordering::Acquire);
+                if applied > self.durable_block.load(Ordering::Acquire) {
+                    self.set_durable_block(applied);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -187,9 +217,10 @@ where
         }
     }
 
-    pub fn shutdown(&self) {
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
+    pub fn shutdown(&self) -> StoreResult<()> {
+        match &self.runtime {
+            Some(runtime) => runtime.shutdown(),
+            None => Ok(()),
         }
     }
 

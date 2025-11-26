@@ -62,11 +62,17 @@ impl StoreHarness {
     }
 
     pub fn reopen(&self) -> StoreResult<MhinStoreFacade> {
+        self.reopen_with_persisted_mode()
+    }
+
+    /// Reopens the store without overriding the durability mode, honoring the
+    /// mode that was persisted in metadata (if any).
+    pub fn reopen_with_persisted_mode(&self) -> StoreResult<MhinStoreFacade> {
         let mut config =
             StoreConfig::existing_with_lmdb_map_size(&self.data_dir, HARNESS_LMDB_MAP_SIZE)
                 .without_remote_server();
         config.thread_count = self.config.thread_count;
-        config.durability_mode = self.config.durability_mode.clone();
+        // Do NOT override durability_mode; let it use what's stored in metadata.
         config.snapshot_interval = self.config.snapshot_interval;
         config.max_snapshot_interval = self.config.max_snapshot_interval;
         config.compress_journal = self.config.compress_journal;

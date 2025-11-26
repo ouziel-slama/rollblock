@@ -28,4 +28,11 @@ pub trait MetadataStore: Send + Sync {
         self.put_journal_offset(block, meta)?;
         self.set_current_block(block)
     }
+
+    fn record_block_commits(&self, entries: &[(BlockId, JournalMeta)]) -> StoreResult<()> {
+        for (block, meta) in entries {
+            self.record_block_commit(*block, meta)?;
+        }
+        Ok(())
+    }
 }

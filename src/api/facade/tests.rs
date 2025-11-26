@@ -5,7 +5,7 @@ use crate::facade::recovery::{
 
 mod recovery_tests {
     use super::*;
-    use crate::block_journal::{BlockJournal, JournalBlock, JournalIter};
+    use crate::block_journal::{BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter};
     use crate::metadata::MetadataStore;
     use crate::state_engine::ShardedStateEngine;
     use crate::state_shard::RawTableShard;
@@ -22,7 +22,7 @@ mod recovery_tests {
             _block: BlockId,
             _undo: &crate::types::BlockUndo,
             _operations: &[Operation],
-        ) -> StoreResult<JournalMeta> {
+        ) -> StoreResult<JournalAppendOutcome> {
             panic!("append should not be called in tests");
         }
 
@@ -164,7 +164,9 @@ mod facade_tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    use crate::block_journal::{BlockJournal, JournalBlock, JournalIter};
+    use crate::block_journal::{
+        BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, SyncPolicy,
+    };
     use crate::metadata::{LmdbMetadataStore, MetadataStore};
     use crate::snapshot::Snapshotter;
     use crate::types::{BlockUndo, JournalMeta, ValueBuf};
@@ -270,6 +272,179 @@ mod facade_tests {
                 .clone()
                 .map(|(block, reason)| MhinStoreError::DurabilityFailure { block, reason })
         }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum DurabilityEvent {
+        SetSyncPolicy,
+        SetMetadataInterval(usize),
+        Flush,
+    }
+
+    #[derive(Default)]
+    struct RecordingDurabilityOrchestrator {
+        events: Mutex<Vec<DurabilityEvent>>,
+    }
+
+    impl RecordingDurabilityOrchestrator {
+        fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        fn record(&self, event: DurabilityEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn drain_events(&self) -> Vec<DurabilityEvent> {
+            self.events.lock().unwrap().drain(..).collect()
+        }
+    }
+
+    impl BlockOrchestrator for RecordingDurabilityOrchestrator {
+        fn apply_operations(
+            &self,
+            _block_height: BlockId,
+            _ops: Vec<Operation>,
+        ) -> StoreResult<()> {
+            Ok(())
+        }
+
+        fn revert_to(&self, _block: BlockId) -> StoreResult<()> {
+            Ok(())
+        }
+
+        fn fetch(&self, _key: Key) -> StoreResult<Value> {
+            Ok(Value::empty())
+        }
+
+        fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
+            Ok(vec![Value::empty(); keys.len()])
+        }
+
+        fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
+            None
+        }
+
+        fn current_block(&self) -> StoreResult<BlockId> {
+            Ok(0)
+        }
+
+        fn applied_block_height(&self) -> BlockId {
+            0
+        }
+
+        fn durable_block_height(&self) -> StoreResult<BlockId> {
+            Ok(0)
+        }
+
+        fn shutdown(&self) -> StoreResult<()> {
+            Ok(())
+        }
+
+        fn ensure_healthy(&self) -> StoreResult<()> {
+            Ok(())
+        }
+
+        fn set_sync_policy(&self, _policy: SyncPolicy) {
+            self.record(DurabilityEvent::SetSyncPolicy);
+        }
+
+        fn set_metadata_sync_interval(&self, sync_every_n_blocks: usize) -> StoreResult<()> {
+            self.record(DurabilityEvent::SetMetadataInterval(sync_every_n_blocks));
+            Ok(())
+        }
+
+        fn flush(&self) -> StoreResult<()> {
+            self.record(DurabilityEvent::Flush);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn enable_relaxed_mode_batches_metadata_before_relaxing_journal() -> StoreResult<()> {
+        let orchestrator = RecordingDurabilityOrchestrator::new();
+        let store = MhinStoreFacade::from_orchestrator(orchestrator.clone());
+
+        store.enable_relaxed_mode(8)?;
+
+        let events = orchestrator.drain_events();
+        let metadata_pos = events
+            .iter()
+            .position(|event| matches!(event, DurabilityEvent::SetMetadataInterval(8)))
+            .expect("metadata batching should be configured");
+        let sync_pos = events
+            .iter()
+            .position(|event| matches!(event, DurabilityEvent::SetSyncPolicy))
+            .expect("journal policy change should be recorded");
+
+        assert!(
+            metadata_pos < sync_pos,
+            "metadata batching must be enabled before relaxed syncs: {events:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn disable_relaxed_mode_flushes_before_metadata_interval_reset() -> StoreResult<()> {
+        let orchestrator = RecordingDurabilityOrchestrator::new();
+        let store = MhinStoreFacade::from_orchestrator(orchestrator.clone());
+
+        store.enable_relaxed_mode(8)?;
+        orchestrator.drain_events(); // Ignore ordering from enable path.
+
+        store.disable_relaxed_mode()?;
+
+        let events = orchestrator.drain_events();
+        assert!(
+            events.contains(&DurabilityEvent::Flush),
+            "disable_relaxed_mode must flush pending persistence work",
+        );
+        assert!(
+            events.contains(&DurabilityEvent::SetMetadataInterval(0)),
+            "metadata batching must be disabled during flush",
+        );
+
+        let flush_pos = events
+            .iter()
+            .position(|event| matches!(event, DurabilityEvent::Flush))
+            .expect("flush event missing");
+        let metadata_pos = events
+            .iter()
+            .position(|event| matches!(event, DurabilityEvent::SetMetadataInterval(0)))
+            .expect("metadata interval reset event missing");
+
+        assert!(
+            flush_pos < metadata_pos,
+            "metadata batching must be disabled only after flush completes: {events:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn relaxed_mode_enabled_reflects_runtime_state() -> StoreResult<()> {
+        let orchestrator = RecordingDurabilityOrchestrator::new();
+        let store = MhinStoreFacade::from_orchestrator(orchestrator);
+
+        assert!(
+            !store.relaxed_mode_enabled(),
+            "store should start in strict mode"
+        );
+
+        store.enable_relaxed_mode(4)?;
+        assert!(
+            store.relaxed_mode_enabled(),
+            "relaxed mode should be enabled"
+        );
+
+        store.disable_relaxed_mode()?;
+        assert!(
+            !store.relaxed_mode_enabled(),
+            "disabling relaxed mode should restore strict behavior"
+        );
+
+        Ok(())
     }
 
     fn wait_for_durable(store: &MhinStoreFacade, target: BlockId) {
@@ -485,7 +660,7 @@ mod facade_tests {
             _block: BlockId,
             _undo: &BlockUndo,
             _operations: &[Operation],
-        ) -> StoreResult<JournalMeta> {
+        ) -> StoreResult<JournalAppendOutcome> {
             unreachable!("stub journal append should not be called");
         }
 
@@ -813,7 +988,8 @@ mod facade_tests {
 
         let meta = journal
             .append(block_height, &undo, &[])
-            .expect("journal append");
+            .expect("journal append")
+            .meta;
 
         // Simulate crash before metadata is updated
         assert_eq!(metadata.current_block().unwrap(), 0);
@@ -879,7 +1055,8 @@ mod facade_tests {
 
         let meta = journal
             .append(block_height, &undo, &[])
-            .expect("journal append");
+            .expect("journal append")
+            .meta;
         metadata
             .record_block_commit(block_height, &meta)
             .expect("metadata record");

@@ -18,6 +18,7 @@ pub use default::DefaultBlockOrchestrator;
 pub use durability::{DurabilityMode, PersistenceSettings};
 pub use persistence::PersistenceContext;
 
+use crate::block_journal::SyncPolicy;
 use crate::error::StoreResult;
 use crate::metrics::StoreMetrics;
 use crate::types::{BlockId, Key, Operation, Value};
@@ -39,4 +40,28 @@ pub trait BlockOrchestrator: Send + Sync {
     /// Implementations that do not track fatal state can keep the default
     /// no-op behavior.
     fn record_fatal_error(&self, _block: BlockId, _reason: String) {}
+
+    /// Changes the journal sync policy at runtime.
+    ///
+    /// This allows switching between relaxed mode (during initial sync)
+    /// and strict mode (when approaching chain tip).
+    fn set_sync_policy(&self, _policy: SyncPolicy) {
+        // Default no-op
+    }
+
+    /// Updates the metadata sync interval to match the journal policy.
+    ///
+    /// Implementations that batch metadata commits in relaxed mode should use this
+    /// hook to decide whether to buffer LMDB writes or flush immediately.
+    fn set_metadata_sync_interval(&self, _sync_every_n_blocks: usize) -> StoreResult<()> {
+        Ok(())
+    }
+
+    /// Flushes all pending writes to disk and ensures they are durable.
+    ///
+    /// This blocks until all in-flight persistence tasks complete and
+    /// an fsync has been performed on the journal.
+    fn flush(&self) -> StoreResult<()> {
+        Ok(()) // Default no-op for implementations without persistence
+    }
 }

@@ -244,6 +244,25 @@ impl MetadataStore for LmdbMetadataStore {
         txn.commit()?;
         Ok(())
     }
+
+    fn record_block_commits(&self, entries: &[(BlockId, JournalMeta)]) -> StoreResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut txn = self.env.write_txn()?;
+        for (block, meta) in entries {
+            self.journal_offsets_db.put(&mut txn, block, meta)?;
+        }
+
+        if let Some((last_block, _)) = entries.last() {
+            self.state_db
+                .put(&mut txn, Self::CURRENT_BLOCK_KEY, last_block)?;
+        }
+
+        txn.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

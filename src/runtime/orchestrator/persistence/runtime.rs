@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -12,14 +12,14 @@ use crate::metadata::MetadataStore;
 use crate::metrics::StoreMetrics;
 use crate::snapshot::Snapshotter;
 use crate::state_engine::StateEngine;
-use crate::types::BlockId;
+use crate::types::{BlockId, JournalMeta};
 
 use super::pending_blocks::PendingBlocks;
 use super::queue::PersistenceQueue;
 use super::task::{PersistenceTask, TaskStatus};
 
 enum PersistOutcome {
-    Committed,
+    Committed { synced: bool },
     Skipped,
 }
 
@@ -52,6 +52,8 @@ where
     durable_block: Arc<AtomicU64>,
     applied_block: Arc<AtomicU64>,
     rollback_barrier: Arc<AtomicU64>,
+    metadata_sync_interval: AtomicUsize,
+    pending_metadata: Mutex<Vec<(BlockId, JournalMeta)>>,
     update_mutex: Arc<Mutex<()>>,
     snapshot_interval: Duration,
     max_snapshot_interval: Duration,
@@ -87,6 +89,7 @@ where
         applied_block: Arc<AtomicU64>,
         rollback_barrier: Arc<AtomicU64>,
         update_mutex: Arc<Mutex<()>>,
+        metadata_sync_interval: usize,
         snapshot_interval: Duration,
         max_snapshot_interval: Duration,
     ) -> Arc<Self> {
@@ -104,6 +107,8 @@ where
             durable_block,
             applied_block,
             rollback_barrier,
+            metadata_sync_interval: AtomicUsize::new(metadata_sync_interval),
+            pending_metadata: Mutex::new(Vec::new()),
             update_mutex,
             snapshot_interval,
             max_snapshot_interval,
@@ -199,11 +204,13 @@ where
             let result = self.persist_block(&task);
 
             match result {
-                Ok(PersistOutcome::Committed) => {
+                Ok(PersistOutcome::Committed { synced }) => {
                     let _ = self.pending_blocks.pop_front(task.block_height);
-                    self.durable_block
-                        .store(task.block_height, Ordering::Release);
-                    self.metrics.update_durable_block(task.block_height);
+                    if synced {
+                        self.durable_block
+                            .store(task.block_height, Ordering::Release);
+                        self.metrics.update_durable_block(task.block_height);
+                    }
                     let metrics_ctx = task.metrics;
                     let duration = metrics_ctx.started_at.elapsed();
                     self.metrics.record_apply(
@@ -333,10 +340,76 @@ where
         }
     }
 
+    pub fn set_metadata_sync_interval(&self, sync_every_n_blocks: usize) -> StoreResult<()> {
+        self.metadata_sync_interval
+            .store(sync_every_n_blocks, Ordering::Release);
+        if sync_every_n_blocks == 0 {
+            self.journal.force_sync()?;
+            self.flush_pending_metadata()?;
+            let applied = self.applied_block.load(Ordering::Acquire);
+            self.update_durable_after_sync(applied);
+        }
+        Ok(())
+    }
+
+    fn metadata_batching_enabled(&self) -> bool {
+        self.metadata_sync_interval.load(Ordering::Acquire) > 0
+    }
+
+    fn append_pending_metadata(&self, block: BlockId, meta: JournalMeta) {
+        let mut guard = self.pending_metadata.lock();
+        guard.push((block, meta));
+    }
+
+    fn flush_pending_metadata(&self) -> StoreResult<()> {
+        self.flush_pending_metadata_through(BlockId::MAX)
+    }
+
+    pub fn flush_pending_metadata_through(&self, block: BlockId) -> StoreResult<()> {
+        let entries = {
+            let mut guard = self.pending_metadata.lock();
+            if guard.is_empty() {
+                return Ok(());
+            }
+            let split = guard.partition_point(|(height, _)| *height <= block);
+            if split == 0 {
+                return Ok(());
+            }
+            guard.drain(..split).collect::<Vec<_>>()
+        };
+        self.metadata.record_block_commits(&entries)
+    }
+
+    pub fn discard_pending_metadata_after(&self, block: BlockId) {
+        let mut guard = self.pending_metadata.lock();
+        guard.retain(|(height, _)| *height <= block);
+    }
+
+    fn clear_pending_metadata(&self) {
+        self.pending_metadata.lock().clear();
+    }
+
+    fn record_metadata(
+        &self,
+        block: BlockId,
+        meta: &JournalMeta,
+        append_synced: bool,
+    ) -> StoreResult<()> {
+        if self.metadata_batching_enabled() {
+            self.append_pending_metadata(block, meta.clone());
+            if append_synced {
+                self.flush_pending_metadata()?;
+            }
+            Ok(())
+        } else {
+            self.metadata.record_block_commit(block, meta)
+        }
+    }
+
     fn persist_block(&self, task: &PersistenceTask) -> StoreResult<PersistOutcome> {
-        let journal_meta = self
-            .journal
-            .append(task.block_height, &task.undo, &task.operations)?;
+        let append_outcome =
+            self.journal
+                .append(task.block_height, &task.undo, &task.operations)?;
 
         let rollback_barrier = self.rollback_barrier.load(Ordering::Acquire);
         if task.block_height > rollback_barrier {
@@ -349,8 +422,11 @@ where
             return Ok(PersistOutcome::Skipped);
         }
 
-        self.metadata
-            .record_block_commit(task.block_height, &journal_meta)?;
+        self.record_metadata(
+            task.block_height,
+            &append_outcome.meta,
+            append_outcome.synced,
+        )?;
 
         let rollback_barrier_after = self.rollback_barrier.load(Ordering::Acquire);
         if task.block_height > rollback_barrier_after {
@@ -360,6 +436,7 @@ where
                 rollback_barrier = rollback_barrier_after,
                 "Rollback barrier moved during persistence; discarding committed block"
             );
+            self.discard_pending_metadata_after(rollback_barrier_after);
             self.metadata
                 .remove_journal_offsets_after(rollback_barrier_after)?;
             self.metadata.set_current_block(rollback_barrier_after)?;
@@ -367,7 +444,19 @@ where
             return Ok(PersistOutcome::Skipped);
         }
 
-        Ok(PersistOutcome::Committed)
+        Ok(PersistOutcome::Committed {
+            synced: append_outcome.synced,
+        })
+    }
+
+    fn update_durable_after_sync(&self, target: BlockId) {
+        let applied = self.applied_block.load(Ordering::Acquire);
+        let capped_target = target.min(applied);
+        let current = self.durable_block.load(Ordering::Acquire);
+        if capped_target > current {
+            self.durable_block.store(capped_target, Ordering::Release);
+            self.metrics.update_durable_block(capped_target);
+        }
     }
 
     fn handle_persist_failure(&self, task: Arc<PersistenceTask>, err: MhinStoreError) {
@@ -404,6 +493,7 @@ where
 
         // Revert any still-pending blocks beyond the failed one.
         let remaining_undos = self.pending_blocks.drain();
+        self.clear_pending_metadata();
         for undo in remaining_undos.into_iter().rev() {
             let revert_block = undo.block_height;
             if let Err(revert_err) = self.state_engine.revert(revert_block, undo.clone()) {
@@ -501,6 +591,10 @@ where
             let durable = self.durable_block.load(Ordering::Acquire);
             let applied = self.applied_block.load(Ordering::Acquire);
             if durable >= applied {
+                // Force sync to ensure all writes are durable before returning
+                self.journal.force_sync()?;
+                self.flush_pending_metadata()?;
+                self.update_durable_after_sync(applied);
                 return Ok(());
             }
 
@@ -509,6 +603,10 @@ where
             // nothing left to wait for, so allow flush to return once both the queue
             // and pending undo stack are drained.
             if self.queue.is_empty() && self.pending_blocks.is_empty() {
+                // Force sync to ensure all writes are durable before returning
+                self.journal.force_sync()?;
+                self.flush_pending_metadata()?;
+                self.update_durable_after_sync(applied);
                 return Ok(());
             }
 
@@ -613,10 +711,14 @@ where
         self.snapshot_interval.min(maximum).max(minimum)
     }
 
-    pub fn shutdown(&self) {
+    pub fn shutdown(&self) -> StoreResult<()> {
         self.queue.stop();
+
+        let flush_result = self.flush();
+
         self.stop.store(true, Ordering::Release);
         self.flush_cv.notify_all();
+
         self.signal_snapshot_shutdown();
         if let Some(handle) = self.worker.lock().take() {
             let _ = handle.join();
@@ -627,6 +729,8 @@ where
         if let Some(handle) = self.snapshot_scheduler.lock().take() {
             let _ = handle.join();
         }
+
+        flush_result
     }
 
     pub fn fatal_error(&self) -> Option<MhinStoreError> {

@@ -1,8 +1,8 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::error::{MhinStoreError, StoreResult};
 use crate::storage::fs::sync_directory;
@@ -10,9 +10,11 @@ use crate::types::{BlockId, BlockUndo, JournalMeta, Operation};
 
 use super::format::{
     checksum_to_u32, read_journal_block, serialize_journal_block, JournalHeader,
-    JOURNAL_FLAG_UNCOMPRESSED, JOURNAL_HEADER_FLAG_NONE,
+    JOURNAL_FLAG_UNCOMPRESSED, JOURNAL_HEADER_FLAG_NONE, JOURNAL_HEADER_SIZE,
 };
-use super::{BlockJournal, JournalBlock, JournalIter, JournalOptions};
+use super::{
+    BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, JournalOptions, SyncPolicy,
+};
 
 pub struct FileBlockJournal {
     root_dir: PathBuf,
@@ -20,6 +22,15 @@ pub struct FileBlockJournal {
     index_path: PathBuf,
     write_lock: Mutex<()>,
     options: JournalOptions,
+    /// Sync policy stored separately for runtime modification.
+    sync_policy: RwLock<SyncPolicy>,
+    /// Lazily opened journal file handle shared across appends.
+    journal_state: Mutex<Option<JournalFileState>>,
+}
+
+struct JournalFileState {
+    file: File,
+    current_offset: u64,
 }
 
 impl FileBlockJournal {
@@ -41,27 +52,20 @@ impl FileBlockJournal {
                 .open(&journal_path)?;
         }
         let index_path = root_dir.join(Self::INDEX_FILE_NAME);
+        let sync_policy = RwLock::new(options.sync_policy.clone());
         Ok(Self {
             root_dir,
             journal_path,
             index_path,
             write_lock: Mutex::new(()),
             options,
+            sync_policy,
+            journal_state: Mutex::new(None),
         })
     }
 
     pub fn root_dir(&self) -> &Path {
         &self.root_dir
-    }
-
-    fn open_journal_for_write(&self) -> StoreResult<(File, bool)> {
-        let existed = self.journal_path.exists();
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&self.journal_path)?;
-        Ok((file, !existed))
     }
 
     fn open_index_for_append(&self) -> StoreResult<(File, bool)> {
@@ -71,6 +75,40 @@ impl FileBlockJournal {
             .append(true)
             .open(&self.index_path)?;
         Ok((file, !existed))
+    }
+
+    fn get_or_open_journal(&self) -> StoreResult<(MutexGuard<'_, Option<JournalFileState>>, bool)> {
+        let mut guard = self.journal_state.lock();
+
+        let was_empty = if guard.is_none() {
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .read(true)
+                .open(&self.journal_path)?;
+            let current_offset = file.metadata()?.len();
+            let was_empty = current_offset == 0;
+
+            *guard = Some(JournalFileState {
+                file,
+                current_offset,
+            });
+            was_empty
+        } else {
+            guard
+                .as_ref()
+                .map(|state| state.current_offset == 0)
+                .unwrap_or(true)
+        };
+
+        Ok((guard, was_empty))
+    }
+
+    fn rewind_failed_append(state: &mut JournalFileState, offset: u64) -> StoreResult<()> {
+        state.file.set_len(offset)?;
+        state.file.seek(SeekFrom::Start(offset))?;
+        state.current_offset = offset;
+        Ok(())
     }
 
     fn load_index(&self) -> StoreResult<Vec<JournalMeta>> {
@@ -117,7 +155,7 @@ impl BlockJournal for FileBlockJournal {
         block: BlockId,
         undo: &BlockUndo,
         operations: &[Operation],
-    ) -> StoreResult<JournalMeta> {
+    ) -> StoreResult<JournalAppendOutcome> {
         if undo.block_height != block {
             return Err(MhinStoreError::JournalBlockIdMismatch {
                 expected: block,
@@ -127,58 +165,130 @@ impl BlockJournal for FileBlockJournal {
 
         let _guard = self.write_lock.lock();
 
-        let (mut journal, journal_created) = self.open_journal_for_write()?;
-        let offset = journal.metadata()?.len();
+        let (mut state_guard, journal_was_empty) = self.get_or_open_journal()?;
+        let state = state_guard
+            .as_mut()
+            .expect("journal state should be initialized after open");
+        let offset = state.current_offset;
+        let mut journal_synced = false;
+        let mut wrote_journal_entry = false;
 
-        let (serialized, entry_count) = serialize_journal_block(block, undo, operations)?;
-        let (payload, flags) = if self.options.compress {
-            (
-                zstd::stream::encode_all(serialized.as_slice(), self.options.compression_level)?,
-                JOURNAL_HEADER_FLAG_NONE,
-            )
-        } else {
-            (serialized.clone(), JOURNAL_FLAG_UNCOMPRESSED)
-        };
+        let result = (|| -> StoreResult<JournalAppendOutcome> {
+            let (serialized, entry_count) = serialize_journal_block(block, undo, operations)?;
+            let (payload, flags) = if self.options.compress {
+                (
+                    zstd::stream::encode_all(
+                        serialized.as_slice(),
+                        self.options.compression_level,
+                    )?,
+                    JOURNAL_HEADER_FLAG_NONE,
+                )
+            } else {
+                (serialized.clone(), JOURNAL_FLAG_UNCOMPRESSED)
+            };
 
-        let checksum_hash = blake3::hash(&payload);
-        let checksum = checksum_to_u32(checksum_hash);
+            let checksum_hash = blake3::hash(&payload);
+            let checksum = checksum_to_u32(checksum_hash);
 
-        let header = JournalHeader::new(
-            block,
-            entry_count,
-            payload.len() as u64,
-            serialized.len() as u64,
-            checksum,
-            flags,
-        );
+            let header = JournalHeader::new(
+                block,
+                entry_count,
+                payload.len() as u64,
+                serialized.len() as u64,
+                checksum,
+                flags,
+            );
 
-        journal.write_all(&header.to_bytes())?;
-        journal.write_all(&payload)?;
-        journal.sync_data()?;
-        if journal_created {
-            if let Some(parent) = self.journal_path.parent() {
-                sync_directory(parent)?;
+            wrote_journal_entry = true;
+            state.file.write_all(&header.to_bytes())?;
+            state.file.write_all(&payload)?;
+            let bytes_written = JOURNAL_HEADER_SIZE as u64 + payload.len() as u64;
+            state.current_offset += bytes_written;
+
+            // Sync according to the configured policy, but always sync the first entry so the
+            // initial block is durable even before a policy-triggered fsync.
+            let should_sync = self.sync_policy.read().should_sync();
+            if should_sync || journal_was_empty {
+                state.file.sync_data()?;
+                journal_synced = true;
+            }
+
+            let meta = JournalMeta {
+                block_height: block,
+                offset,
+                compressed_len: payload.len() as u64,
+                checksum,
+            };
+
+            let (mut index, index_created) = self.open_index_for_append()?;
+            let index_was_empty = index.metadata()?.len() == 0;
+            let index_bytes = bincode::serialize(&meta)?;
+            index.write_all(&index_bytes)?;
+
+            // Sync according to the configured policy (reuse decision from journal sync)
+            if should_sync || index_was_empty {
+                index.sync_data()?;
+            }
+
+            // Always sync when the file was just created
+            if index_created {
+                index.sync_data()?;
+                if let Some(parent) = self.index_path.parent() {
+                    sync_directory(parent)?;
+                }
+            }
+
+            Ok(JournalAppendOutcome {
+                meta,
+                synced: journal_synced,
+            })
+        })();
+
+        match result {
+            Ok(outcome) => {
+                drop(state_guard);
+                Ok(outcome)
+            }
+            Err(err) => {
+                if wrote_journal_entry {
+                    if let Err(rewind_err) = Self::rewind_failed_append(state, offset) {
+                        drop(state_guard);
+                        return Err(rewind_err);
+                    }
+                }
+                drop(state_guard);
+                Err(err)
+            }
+        }
+    }
+
+    fn force_sync(&self) -> StoreResult<()> {
+        let _guard = self.write_lock.lock();
+
+        // Sync journal file if it's already open.
+        {
+            let state_guard = self.journal_state.lock();
+            if let Some(state) = state_guard.as_ref() {
+                state.file.sync_data()?;
             }
         }
 
-        let meta = JournalMeta {
-            block_height: block,
-            offset,
-            compressed_len: payload.len() as u64,
-            checksum,
-        };
-
-        let (mut index, index_created) = self.open_index_for_append()?;
-        let index_bytes = bincode::serialize(&meta)?;
-        index.write_all(&index_bytes)?;
-        index.sync_data()?;
-        if index_created {
-            if let Some(parent) = self.index_path.parent() {
-                sync_directory(parent)?;
-            }
+        // Sync index file
+        if self.index_path.exists() {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.index_path)?;
+            file.sync_data()?;
         }
 
-        Ok(meta)
+        // Reset the sync counter so we don't skip the next required sync
+        self.sync_policy.read().reset();
+
+        Ok(())
+    }
+
+    fn set_sync_policy(&self, policy: SyncPolicy) {
+        *self.sync_policy.write() = policy;
     }
 
     fn iter_backwards(&self, from: BlockId, to: BlockId) -> StoreResult<JournalIter> {
@@ -212,6 +322,11 @@ impl BlockJournal for FileBlockJournal {
 
     fn truncate_after(&self, block: BlockId) -> StoreResult<()> {
         let _guard = self.write_lock.lock();
+
+        {
+            let mut state_guard = self.journal_state.lock();
+            *state_guard = None;
+        }
 
         if !self.journal_path.exists() {
             return Ok(());
@@ -276,7 +391,10 @@ mod tests {
         let undo = sample_undo(block_height);
         let operations = sample_operations(block_height);
 
-        let meta = journal.append(block_height, &undo, &operations).unwrap();
+        let meta = journal
+            .append(block_height, &undo, &operations)
+            .unwrap()
+            .meta;
         assert_eq!(meta.block_height, block_height);
 
         let mut iter = journal.iter_backwards(block_height, block_height).unwrap();
@@ -345,7 +463,7 @@ mod tests {
             shard_undos: Vec::new(),
         };
 
-        let meta = journal.append(block_height, &undo, &[]).unwrap();
+        let meta = journal.append(block_height, &undo, &[]).unwrap().meta;
         assert_eq!(meta.block_height, block_height);
 
         let mut iter = journal.iter_backwards(block_height, block_height).unwrap();
@@ -440,7 +558,10 @@ mod tests {
         let block_height = 5;
         let undo = sample_undo(block_height);
         let operations = sample_operations(block_height);
-        let meta = journal.append(block_height, &undo, &operations).unwrap();
+        let meta = journal
+            .append(block_height, &undo, &operations)
+            .unwrap()
+            .meta;
 
         let journal_path = journal.root_dir().join("journal.bin");
         let mut file = OpenOptions::new()
