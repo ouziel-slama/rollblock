@@ -214,7 +214,8 @@ where
         if !rewrite_required {
             for (indexed, scanned) in index_entries.iter().zip(scanned_entries.iter()) {
                 if indexed.block_height != scanned.block_height
-                    || indexed.offset != scanned.offset
+                    || indexed.chunk_id != scanned.chunk_id
+                    || indexed.chunk_offset != scanned.chunk_offset
                     || indexed.compressed_len != scanned.compressed_len
                     || indexed.checksum != scanned.checksum
                 {

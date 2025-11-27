@@ -1,24 +1,26 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::error::{MhinStoreError, StoreResult};
 use crate::storage::fs::sync_directory;
-use crate::types::{BlockId, BlockUndo, JournalMeta, Operation};
+use crate::types::{
+    BlockId, BlockUndo, JournalMeta, Operation, ShardUndo, UndoEntry, UndoOp, Value,
+};
 
 use super::format::{
     checksum_to_u32, read_journal_block, serialize_journal_block, JournalHeader,
     JOURNAL_FLAG_UNCOMPRESSED, JOURNAL_HEADER_FLAG_NONE, JOURNAL_HEADER_SIZE,
 };
 use super::{
+    chunk::{chunk_file_path, enumerate_chunk_files},
     BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, JournalOptions, SyncPolicy,
 };
 
 pub struct FileBlockJournal {
     root_dir: PathBuf,
-    journal_path: PathBuf,
     index_path: PathBuf,
     write_lock: Mutex<()>,
     options: JournalOptions,
@@ -29,12 +31,12 @@ pub struct FileBlockJournal {
 }
 
 struct JournalFileState {
+    chunk_id: u32,
     file: File,
     current_offset: u64,
 }
 
 impl FileBlockJournal {
-    const JOURNAL_FILE_NAME: &'static str = "journal.bin";
     const INDEX_FILE_NAME: &'static str = "journal.idx";
 
     pub fn new(root_dir: impl AsRef<Path>) -> StoreResult<Self> {
@@ -44,24 +46,51 @@ impl FileBlockJournal {
     pub fn with_options(root_dir: impl AsRef<Path>, options: JournalOptions) -> StoreResult<Self> {
         let root_dir = root_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&root_dir)?;
-        let journal_path = root_dir.join(Self::JOURNAL_FILE_NAME);
-        if !journal_path.exists() {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&journal_path)?;
-        }
+        let mut options = options;
+        let min_entry_size = Self::minimum_entry_size_bytes(&options)?;
+        options.max_chunk_size_bytes = options.max_chunk_size_bytes.max(min_entry_size);
         let index_path = root_dir.join(Self::INDEX_FILE_NAME);
         let sync_policy = RwLock::new(options.sync_policy.clone());
         Ok(Self {
             root_dir,
-            journal_path,
             index_path,
             write_lock: Mutex::new(()),
             options,
             sync_policy,
             journal_state: Mutex::new(None),
         })
+    }
+
+    fn minimum_entry_size_bytes(options: &JournalOptions) -> StoreResult<u64> {
+        const MIN_BLOCK: BlockId = 0;
+        const MIN_KEY: [u8; 8] = [0u8; 8];
+
+        // Ensure the minimum chunk size can accommodate at least one operation plus its undo.
+        let minimal_value = Value::from_le_bytes([0u8; 8]);
+        let minimal_operations = [Operation {
+            key: MIN_KEY,
+            value: minimal_value.clone(),
+        }];
+        let minimal_undo = BlockUndo {
+            block_height: MIN_BLOCK,
+            shard_undos: vec![ShardUndo {
+                shard_index: 0,
+                entries: vec![UndoEntry {
+                    key: MIN_KEY,
+                    previous: Some(minimal_value),
+                    op: UndoOp::Updated,
+                }],
+            }],
+        };
+
+        let (serialized, _) =
+            serialize_journal_block(MIN_BLOCK, &minimal_undo, &minimal_operations)?;
+        let payload = if options.compress {
+            zstd::stream::encode_all(serialized.as_slice(), options.compression_level)?
+        } else {
+            serialized
+        };
+        Ok(JOURNAL_HEADER_SIZE as u64 + payload.len() as u64)
     }
 
     pub fn root_dir(&self) -> &Path {
@@ -80,34 +109,114 @@ impl FileBlockJournal {
     fn get_or_open_journal(&self) -> StoreResult<(MutexGuard<'_, Option<JournalFileState>>, bool)> {
         let mut guard = self.journal_state.lock();
 
-        let was_empty = if guard.is_none() {
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .read(true)
-                .open(&self.journal_path)?;
-            let current_offset = file.metadata()?.len();
-            let was_empty = current_offset == 0;
+        if guard.is_none() {
+            let state = self.bootstrap_active_chunk()?;
+            *guard = Some(state);
+        }
 
-            *guard = Some(JournalFileState {
-                file,
-                current_offset,
-            });
-            was_empty
-        } else {
-            guard
-                .as_ref()
-                .map(|state| state.current_offset == 0)
-                .unwrap_or(true)
-        };
+        let was_empty = guard
+            .as_ref()
+            .map(|state| state.current_offset == 0)
+            .unwrap_or(true);
 
         Ok((guard, was_empty))
     }
 
-    fn rewind_failed_append(state: &mut JournalFileState, offset: u64) -> StoreResult<()> {
-        state.file.set_len(offset)?;
-        state.file.seek(SeekFrom::Start(offset))?;
-        state.current_offset = offset;
+    fn bootstrap_active_chunk(&self) -> StoreResult<JournalFileState> {
+        std::fs::create_dir_all(&self.root_dir)?;
+        let mut chunks = enumerate_chunk_files(&self.root_dir)?;
+
+        while let Some((chunk_id, path)) = chunks.pop() {
+            let metadata = std::fs::metadata(&path)?;
+            if metadata.len() == 0 {
+                std::fs::remove_file(&path)?;
+                sync_directory(&self.root_dir)?;
+                continue;
+            }
+            return self.open_existing_chunk(chunk_id);
+        }
+
+        self.create_chunk(1)
+    }
+
+    fn open_existing_chunk(&self, chunk_id: u32) -> StoreResult<JournalFileState> {
+        let path = chunk_file_path(&self.root_dir, chunk_id);
+        let current_offset = super::maintenance::repair_chunk_tail(&path, chunk_id)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&path)?;
+        Ok(JournalFileState {
+            chunk_id,
+            file,
+            current_offset,
+        })
+    }
+
+    fn create_chunk(&self, chunk_id: u32) -> StoreResult<JournalFileState> {
+        let path = chunk_file_path(&self.root_dir, chunk_id);
+        match OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .read(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                file.sync_all()?;
+                sync_directory(&self.root_dir)?;
+                Ok(JournalFileState {
+                    chunk_id,
+                    file,
+                    current_offset: 0,
+                })
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                self.open_existing_chunk(chunk_id)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn rotate_chunk_if_needed(
+        &self,
+        state: &mut JournalFileState,
+        bytes_required: u64,
+    ) -> StoreResult<()> {
+        let max_size = self.options.max_chunk_size_bytes;
+        if bytes_required > max_size {
+            return Err(MhinStoreError::UnsupportedOperation {
+                reason: format!(
+                    "journal chunk size {max_size} is smaller than required entry size {bytes_required}"
+                ),
+            });
+        }
+
+        if state.current_offset + bytes_required <= max_size {
+            return Ok(());
+        }
+
+        state.file.sync_data()?;
+        let next_chunk_id =
+            state
+                .chunk_id
+                .checked_add(1)
+                .ok_or_else(|| MhinStoreError::UnsupportedOperation {
+                    reason: "exhausted journal chunk ids".to_string(),
+                })?;
+        *state = self.create_chunk(next_chunk_id)?;
+        Ok(())
+    }
+
+    fn open_chunk_for_read(&self, chunk_id: u32) -> StoreResult<File> {
+        let path = chunk_file_path(&self.root_dir, chunk_id);
+        Ok(OpenOptions::new().read(true).open(path)?)
+    }
+
+    fn rewind_failed_append(state: &mut JournalFileState, chunk_offset: u64) -> StoreResult<()> {
+        state.file.set_len(chunk_offset)?;
+        state.file.seek(SeekFrom::Start(chunk_offset))?;
+        state.current_offset = chunk_offset;
         Ok(())
     }
 
@@ -165,13 +274,13 @@ impl BlockJournal for FileBlockJournal {
 
         let _guard = self.write_lock.lock();
 
-        let (mut state_guard, journal_was_empty) = self.get_or_open_journal()?;
+        let (mut state_guard, _) = self.get_or_open_journal()?;
         let state = state_guard
             .as_mut()
             .expect("journal state should be initialized after open");
-        let offset = state.current_offset;
         let mut journal_synced = false;
         let mut wrote_journal_entry = false;
+        let mut chunk_offset = state.current_offset;
 
         let result = (|| -> StoreResult<JournalAppendOutcome> {
             let (serialized, entry_count) = serialize_journal_block(block, undo, operations)?;
@@ -199,23 +308,28 @@ impl BlockJournal for FileBlockJournal {
                 flags,
             );
 
+            let bytes_required = JOURNAL_HEADER_SIZE as u64 + payload.len() as u64;
+            self.rotate_chunk_if_needed(state, bytes_required)?;
+            chunk_offset = state.current_offset;
+            let chunk_was_empty = state.current_offset == 0;
+
             wrote_journal_entry = true;
             state.file.write_all(&header.to_bytes())?;
             state.file.write_all(&payload)?;
-            let bytes_written = JOURNAL_HEADER_SIZE as u64 + payload.len() as u64;
-            state.current_offset += bytes_written;
+            state.current_offset += bytes_required;
 
             // Sync according to the configured policy, but always sync the first entry so the
-            // initial block is durable even before a policy-triggered fsync.
+            // initial block in a chunk is durable even before a policy-triggered fsync.
             let should_sync = self.sync_policy.read().should_sync();
-            if should_sync || journal_was_empty {
+            if should_sync || chunk_was_empty {
                 state.file.sync_data()?;
                 journal_synced = true;
             }
 
             let meta = JournalMeta {
                 block_height: block,
-                offset,
+                chunk_id: state.chunk_id,
+                chunk_offset,
                 compressed_len: payload.len() as u64,
                 checksum,
             };
@@ -251,7 +365,7 @@ impl BlockJournal for FileBlockJournal {
             }
             Err(err) => {
                 if wrote_journal_entry {
-                    if let Err(rewind_err) = Self::rewind_failed_append(state, offset) {
+                    if let Err(rewind_err) = Self::rewind_failed_append(state, chunk_offset) {
                         drop(state_guard);
                         return Err(rewind_err);
                     }
@@ -307,12 +421,10 @@ impl BlockJournal for FileBlockJournal {
             .filter(|meta| meta.block_height <= from && meta.block_height >= to)
             .collect();
 
-        let file = OpenOptions::new().read(true).open(&self.journal_path)?;
-
-        Ok(JournalIter::new(file, filtered))
+        Ok(JournalIter::new(self.root_dir.clone(), filtered))
     }
     fn read_entry(&self, meta: &JournalMeta) -> StoreResult<JournalBlock> {
-        let mut file = OpenOptions::new().read(true).open(&self.journal_path)?;
+        let mut file = self.open_chunk_for_read(meta.chunk_id)?;
         read_journal_block(&mut file, meta)
     }
 
@@ -328,12 +440,8 @@ impl BlockJournal for FileBlockJournal {
             *state_guard = None;
         }
 
-        if !self.journal_path.exists() {
-            return Ok(());
-        }
-
         let metas = self.load_index()?;
-        super::maintenance::truncate_after(&self.journal_path, &self.index_path, block, metas)
+        super::maintenance::truncate_after(&self.root_dir, &self.index_path, block, metas)
     }
 
     fn rewrite_index(&self, metas: &[JournalMeta]) -> StoreResult<()> {
@@ -342,14 +450,20 @@ impl BlockJournal for FileBlockJournal {
     }
 
     fn scan_entries(&self) -> StoreResult<Vec<JournalMeta>> {
-        super::maintenance::scan_entries(&self.journal_path)
+        let _guard = self.write_lock.lock();
+        super::maintenance::scan_entries(&self.root_dir)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::journal::format::JOURNAL_HEADER_SIZE;
+    use crate::storage::journal::chunk::chunk_file_path;
+    use crate::storage::journal::format::{
+        checksum_to_u32, serialize_journal_block, JournalHeader, JOURNAL_FLAG_UNCOMPRESSED,
+        JOURNAL_HEADER_FLAG_NONE, JOURNAL_HEADER_SIZE,
+    };
+    use crate::storage::journal::maintenance;
     use crate::types::{Operation, ShardUndo, UndoEntry, UndoOp, Value};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -377,6 +491,19 @@ mod tests {
         BlockUndo {
             block_height: block,
             shard_undos: vec![sample_shard(0, [1u8; 8], 42.into())],
+        }
+    }
+
+    fn chunk_options_fitting_one_entry(
+        block: BlockId,
+        undo: &BlockUndo,
+        operations: &[Operation],
+    ) -> JournalOptions {
+        let (serialized, _) = serialize_journal_block(block, undo, operations).unwrap();
+        JournalOptions {
+            compress: false,
+            max_chunk_size_bytes: JOURNAL_HEADER_SIZE as u64 + serialized.len() as u64,
+            ..JournalOptions::default()
         }
     }
 
@@ -542,7 +669,6 @@ mod tests {
         std::fs::create_dir_all(&workspace_tmp).unwrap();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let journal = FileBlockJournal::new(tmp.path()).unwrap();
-        std::fs::File::create(journal.root_dir().join("journal.bin")).unwrap();
 
         let mut iter = journal.iter_backwards(0, 0).unwrap();
         assert!(iter.next_entry().is_none());
@@ -563,20 +689,24 @@ mod tests {
             .unwrap()
             .meta;
 
-        let journal_path = journal.root_dir().join("journal.bin");
+        let journal_path = chunk_file_path(journal.root_dir(), meta.chunk_id);
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(journal_path)
             .unwrap();
-        file.seek(SeekFrom::Start(meta.offset + JOURNAL_HEADER_SIZE as u64))
-            .unwrap();
+        file.seek(SeekFrom::Start(
+            meta.chunk_offset + JOURNAL_HEADER_SIZE as u64,
+        ))
+        .unwrap();
 
         let mut byte = [0u8];
         file.read_exact(&mut byte).unwrap();
         byte[0] ^= 0xFF;
-        file.seek(SeekFrom::Start(meta.offset + JOURNAL_HEADER_SIZE as u64))
-            .unwrap();
+        file.seek(SeekFrom::Start(
+            meta.chunk_offset + JOURNAL_HEADER_SIZE as u64,
+        ))
+        .unwrap();
         file.write_all(&byte).unwrap();
         file.flush().unwrap();
 
@@ -586,5 +716,243 @@ mod tests {
             MhinStoreError::JournalChecksumMismatch { block } => assert_eq!(block, block_height),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rotates_chunk_when_limit_reached() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let block_one = 1;
+        let undo_one = sample_undo(block_one);
+        let operations_one = sample_operations(block_one);
+        let options = chunk_options_fitting_one_entry(block_one, &undo_one, &operations_one);
+        let journal = FileBlockJournal::with_options(tmp.path(), options).unwrap();
+
+        let first_meta = journal
+            .append(block_one, &undo_one, &operations_one)
+            .unwrap()
+            .meta;
+        assert_eq!(first_meta.chunk_id, 1);
+        assert_eq!(first_meta.chunk_offset, 0);
+
+        let block_two = block_one + 1;
+        let undo_two = sample_undo(block_two);
+        let operations_two = sample_operations(block_two);
+        let second_meta = journal
+            .append(block_two, &undo_two, &operations_two)
+            .unwrap()
+            .meta;
+        assert_eq!(second_meta.chunk_id, 2, "chunk should rotate after limit");
+        assert_eq!(second_meta.chunk_offset, 0);
+
+        assert!(chunk_file_path(journal.root_dir(), 1).exists());
+        assert!(chunk_file_path(journal.root_dir(), 2).exists());
+    }
+
+    #[test]
+    fn iterates_across_chunk_boundaries() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let block_one = 10;
+        let undo_one = sample_undo(block_one);
+        let operations_one = sample_operations(block_one);
+        let options = chunk_options_fitting_one_entry(block_one, &undo_one, &operations_one);
+        let journal = FileBlockJournal::with_options(tmp.path(), options).unwrap();
+
+        for block in block_one..block_one + 3 {
+            let undo = sample_undo(block);
+            let operations = sample_operations(block);
+            journal.append(block, &undo, &operations).unwrap();
+        }
+
+        let mut iter = journal
+            .iter_backwards(block_one + 2, block_one)
+            .expect("iterator should open");
+        let mut seen = Vec::new();
+        while let Some(entry) = iter.next_entry() {
+            seen.push(entry.unwrap().block_height);
+        }
+        assert_eq!(seen, vec![block_one + 2, block_one + 1, block_one]);
+    }
+
+    #[test]
+    fn truncate_removes_later_chunks() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let block_one = 20;
+        let undo_one = sample_undo(block_one);
+        let operations_one = sample_operations(block_one);
+        let options = chunk_options_fitting_one_entry(block_one, &undo_one, &operations_one);
+        let journal = FileBlockJournal::with_options(tmp.path(), options).unwrap();
+
+        for block in block_one..block_one + 3 {
+            let undo = sample_undo(block);
+            let operations = sample_operations(block);
+            journal.append(block, &undo, &operations).unwrap();
+        }
+
+        assert!(chunk_file_path(journal.root_dir(), 2).exists());
+        journal.truncate_after(block_one).unwrap();
+        assert!(
+            !chunk_file_path(journal.root_dir(), 2).exists(),
+            "truncate should remove newer chunk files"
+        );
+
+        let entries = journal.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].block_height, block_one);
+    }
+
+    #[test]
+    fn tiny_chunk_size_is_clamped() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let options = JournalOptions {
+            compress: false,
+            max_chunk_size_bytes: 1,
+            ..JournalOptions::default()
+        };
+        let expected_min =
+            FileBlockJournal::minimum_entry_size_bytes(&options).expect("min size computable");
+        let journal = FileBlockJournal::with_options(tmp.path(), options.clone()).unwrap();
+        assert_eq!(journal.options.max_chunk_size_bytes, expected_min);
+
+        let block_height = 50;
+        let undo = sample_undo(block_height);
+        let operations = sample_operations(block_height);
+        journal
+            .append(block_height, &undo, &operations)
+            .expect("append succeeds despite tiny requested chunk");
+    }
+
+    #[test]
+    fn bootstrap_truncates_partial_header_before_reuse() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let journal = FileBlockJournal::new(tmp.path()).unwrap();
+
+        let block_one = 30;
+        let undo_one = sample_undo(block_one);
+        let operations_one = sample_operations(block_one);
+        let first_meta = journal
+            .append(block_one, &undo_one, &operations_one)
+            .unwrap()
+            .meta;
+        let first_end =
+            first_meta.chunk_offset + JOURNAL_HEADER_SIZE as u64 + first_meta.compressed_len;
+
+        let chunk_path = chunk_file_path(journal.root_dir(), first_meta.chunk_id);
+        {
+            let mut file = OpenOptions::new().write(true).open(&chunk_path).unwrap();
+            file.seek(SeekFrom::Start(first_end)).unwrap();
+            let bogus_header =
+                JournalHeader::new(block_one + 1, 0, 0, 0, 0, JOURNAL_HEADER_FLAG_NONE);
+            let header_bytes = bogus_header.to_bytes();
+            file.write_all(&header_bytes[..JOURNAL_HEADER_SIZE / 2])
+                .unwrap();
+            file.sync_all().unwrap();
+        }
+
+        drop(journal);
+
+        let reopened = FileBlockJournal::new(tmp.path()).unwrap();
+        let block_two = block_one + 1;
+        let undo_two = sample_undo(block_two);
+        let operations_two = sample_operations(block_two);
+        let second_meta = reopened
+            .append(block_two, &undo_two, &operations_two)
+            .unwrap()
+            .meta;
+
+        assert_eq!(second_meta.chunk_id, first_meta.chunk_id);
+        assert_eq!(
+            second_meta.chunk_offset, first_end,
+            "second append should start immediately after the last durable entry"
+        );
+
+        let chunk_path = chunk_file_path(reopened.root_dir(), second_meta.chunk_id);
+        let final_len = std::fs::metadata(&chunk_path).unwrap().len();
+        let expected_len =
+            second_meta.chunk_offset + JOURNAL_HEADER_SIZE as u64 + second_meta.compressed_len;
+        assert_eq!(final_len, expected_len);
+    }
+
+    #[test]
+    fn scan_entries_truncates_corrupted_chunk_tail() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let options = JournalOptions {
+            compress: false,
+            ..JournalOptions::default()
+        };
+        let journal = FileBlockJournal::with_options(tmp.path(), options).unwrap();
+
+        let block_one = 40;
+        let undo_one = sample_undo(block_one);
+        let operations_one = sample_operations(block_one);
+        let first_meta = journal
+            .append(block_one, &undo_one, &operations_one)
+            .unwrap()
+            .meta;
+        let first_end =
+            first_meta.chunk_offset + JOURNAL_HEADER_SIZE as u64 + first_meta.compressed_len;
+
+        let block_two = block_one + 1;
+        let undo_two = sample_undo(block_two);
+        let operations_two = sample_operations(block_two);
+        let (serialized, entry_count) =
+            serialize_journal_block(block_two, &undo_two, &operations_two).unwrap();
+        let payload = serialized.clone();
+        let checksum = checksum_to_u32(blake3::hash(&payload));
+        let header = JournalHeader::new(
+            block_two,
+            entry_count,
+            payload.len() as u64,
+            serialized.len() as u64,
+            checksum,
+            JOURNAL_FLAG_UNCOMPRESSED,
+        );
+        let header_bytes = header.to_bytes();
+
+        let chunk_path = chunk_file_path(journal.root_dir(), first_meta.chunk_id);
+        {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&chunk_path)
+                .unwrap();
+            file.seek(SeekFrom::Start(first_end)).unwrap();
+            // Simulate crash-left header fragment followed by a valid entry that should become unreachable.
+            file.write_all(&header_bytes[..8]).unwrap();
+            file.write_all(&header_bytes).unwrap();
+            file.write_all(&payload).unwrap();
+            file.sync_all().unwrap();
+        }
+
+        drop(journal);
+
+        let scanned = maintenance::scan_entries(tmp.path()).unwrap();
+        assert_eq!(
+            scanned.len(),
+            1,
+            "scanning should stop at the corruption point"
+        );
+        assert_eq!(scanned[0].block_height, block_one);
+
+        let final_len = std::fs::metadata(chunk_file_path(tmp.path(), first_meta.chunk_id))
+            .unwrap()
+            .len();
+        assert_eq!(final_len, first_end, "corrupted tail should be truncated");
     }
 }

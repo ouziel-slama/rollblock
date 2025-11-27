@@ -30,6 +30,7 @@ impl LmdbMetadataStore {
     const SHARD_LAYOUT_KEY: &'static str = "shard_layout";
     const DURABILITY_MODE_KEY: &'static str = "durability_mode";
     const LMDB_MAP_SIZE_KEY: &'static str = "lmdb_map_size";
+    const JOURNAL_CHUNK_SIZE_KEY: &'static str = "journal_chunk_size_bytes";
     const DEFAULT_MAP_SIZE: usize = env::DEFAULT_MAP_SIZE;
 
     /// Creates a new LMDB metadata store with the default map size.
@@ -135,6 +136,25 @@ impl LmdbMetadataStore {
             Self::LMDB_MAP_SIZE_KEY,
             map_size,
         )
+    }
+
+    pub fn load_journal_chunk_size(&self) -> StoreResult<Option<u64>> {
+        let txn = self.env.read_txn()?;
+        if let Some(bytes) = self.config_db.get(&txn, Self::JOURNAL_CHUNK_SIZE_KEY)? {
+            let stored: u64 = bincode::deserialize(bytes)?;
+            Ok(Some(stored))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn store_journal_chunk_size(&self, size: u64) -> StoreResult<()> {
+        let mut txn = self.env.write_txn()?;
+        let encoded = bincode::serialize(&size)?;
+        self.config_db
+            .put(&mut txn, Self::JOURNAL_CHUNK_SIZE_KEY, &encoded)?;
+        txn.commit()?;
+        Ok(())
     }
 }
 
@@ -275,10 +295,11 @@ mod tests {
 
     use crate::error::MhinStoreError;
 
-    fn sample_meta(block_height: BlockId, offset: u64) -> JournalMeta {
+    fn sample_meta(block_height: BlockId, chunk_offset: u64) -> JournalMeta {
         JournalMeta {
             block_height,
-            offset,
+            chunk_id: 1,
+            chunk_offset,
             compressed_len: 16,
             checksum: 1234 + block_height as u32,
         }
@@ -314,11 +335,11 @@ mod tests {
         let result = store.get_journal_offsets(1..=3).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].block_height, 1);
-        assert_eq!(result[0].offset, 0);
+        assert_eq!(result[0].chunk_offset, 0);
         assert_eq!(result[0].compressed_len, 16);
         assert_eq!(result[0].checksum, 1235);
         assert_eq!(result[1].block_height, 3);
-        assert_eq!(result[1].offset, 128);
+        assert_eq!(result[1].chunk_offset, 128);
         assert_eq!(result[1].checksum, 1237);
 
         let empty = store.get_journal_offsets(4..=6).unwrap();
@@ -421,5 +442,20 @@ mod tests {
         let offsets = store.get_journal_offsets(1_000_000..=1_000_000).unwrap();
         assert_eq!(offsets.len(), 1);
         assert_eq!(offsets[0].block_height, 1_000_000);
+    }
+
+    #[test]
+    fn journal_chunk_size_round_trip() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let store = LmdbMetadataStore::new(tmp.path()).unwrap();
+
+        assert!(store.load_journal_chunk_size().unwrap().is_none());
+
+        let chunk_size = 8_u64 << 20;
+        store.store_journal_chunk_size(chunk_size).unwrap();
+
+        assert_eq!(store.load_journal_chunk_size().unwrap(), Some(chunk_size));
     }
 }

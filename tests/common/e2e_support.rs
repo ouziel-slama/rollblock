@@ -77,6 +77,7 @@ impl StoreHarness {
         config.max_snapshot_interval = self.config.max_snapshot_interval;
         config.compress_journal = self.config.compress_journal;
         config.journal_compression_level = self.config.journal_compression_level;
+        config.journal_chunk_size_bytes = self.config.journal_chunk_size_bytes;
         MhinStoreFacade::new(config)
     }
 }
@@ -90,6 +91,7 @@ pub struct StoreHarnessBuilder {
     max_snapshot_interval: Duration,
     compress_journal: bool,
     journal_compression_level: i32,
+    journal_chunk_size_bytes: u64,
 }
 
 impl StoreHarnessBuilder {
@@ -109,6 +111,7 @@ impl StoreHarnessBuilder {
             max_snapshot_interval: Duration::from_secs(3600),
             compress_journal: false,
             journal_compression_level: 0,
+            journal_chunk_size_bytes: 128 << 20,
         }
     }
 
@@ -143,6 +146,11 @@ impl StoreHarnessBuilder {
         self
     }
 
+    pub fn journal_chunk_size(mut self, bytes: u64) -> Self {
+        self.journal_chunk_size_bytes = bytes.max(1);
+        self
+    }
+
     pub fn build(self) -> StoreHarness {
         let data_dir = self.tempdir.path().to_path_buf();
 
@@ -160,6 +168,7 @@ impl StoreHarnessBuilder {
         config.max_snapshot_interval = self.max_snapshot_interval;
         config.compress_journal = self.compress_journal;
         config.journal_compression_level = self.journal_compression_level;
+        config.journal_chunk_size_bytes = self.journal_chunk_size_bytes;
 
         StoreHarness {
             tempdir: self.tempdir,

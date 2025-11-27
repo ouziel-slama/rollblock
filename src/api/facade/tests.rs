@@ -1005,7 +1005,8 @@ mod facade_tests {
             .expect("offset fetch");
         assert_eq!(offsets.len(), 1);
         assert_eq!(offsets[0].block_height, block_height);
-        assert_eq!(offsets[0].offset, meta.offset);
+        assert_eq!(offsets[0].chunk_id, meta.chunk_id);
+        assert_eq!(offsets[0].chunk_offset, meta.chunk_offset);
         assert_eq!(offsets[0].compressed_len, meta.compressed_len);
     }
 
@@ -1090,7 +1091,8 @@ mod facade_tests {
             .expect("offset fetch");
         assert_eq!(offsets.len(), 1);
         assert_eq!(offsets[0].block_height, block_height);
-        assert_eq!(offsets[0].offset, meta.offset);
+        assert_eq!(offsets[0].chunk_id, meta.chunk_id);
+        assert_eq!(offsets[0].chunk_offset, meta.chunk_offset);
         assert_eq!(metadata.current_block().unwrap(), block_height);
     }
 
@@ -1604,21 +1606,30 @@ mod facade_tests {
             // Drop without closing to leave journal as-is.
         }
 
-        let journal_path = data_dir.join("journal").join("journal.bin");
-        assert!(
-            journal_path.exists(),
-            "journal file should exist after sets"
-        );
-        let journal = OpenOptions::new()
-            .write(true)
-            .open(&journal_path)
-            .expect("journal file should open");
-        let len = journal.metadata().unwrap().len();
-        journal
-            .set_len(len.saturating_sub(5))
-            .expect("should truncate journal tail");
-        journal.sync_all().unwrap();
+        let journal_dir = data_dir.join("journal");
+        let journal = FileBlockJournal::new(&journal_dir).expect("journal should reopen");
+        let entries = journal
+            .list_entries()
+            .expect("list entries should succeed after appends");
+        let last_meta = entries
+            .last()
+            .cloned()
+            .expect("journal should contain entries");
         drop(journal);
+
+        let chunk_name = format!("journal.{:08}.bin", last_meta.chunk_id);
+        let chunk_path = journal_dir.join(chunk_name);
+        assert!(chunk_path.exists(), "chunk file should exist after sets");
+        let chunk = OpenOptions::new()
+            .write(true)
+            .open(&chunk_path)
+            .expect("chunk file should open");
+        let len = chunk.metadata().unwrap().len();
+        chunk
+            .set_len(len.saturating_sub(5))
+            .expect("should truncate chunk tail");
+        chunk.sync_all().unwrap();
+        drop(chunk);
 
         let reopened = MhinStoreFacade::new(config.clone()).expect("store should reopen");
         assert_eq!(

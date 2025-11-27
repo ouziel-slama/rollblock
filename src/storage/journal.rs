@@ -3,6 +3,7 @@ use crate::types::{BlockId, BlockUndo, JournalMeta, Operation};
 use crate::error::StoreResult;
 use serde::{Deserialize, Serialize};
 
+pub mod chunk;
 pub mod file;
 pub mod format;
 pub mod iter;
@@ -114,6 +115,7 @@ pub struct JournalOptions {
     pub compress: bool,
     pub compression_level: i32,
     pub sync_policy: SyncPolicy,
+    pub max_chunk_size_bytes: u64,
 }
 
 impl Default for JournalOptions {
@@ -122,6 +124,7 @@ impl Default for JournalOptions {
             compress: true,
             compression_level: 0,
             sync_policy: SyncPolicy::default(),
+            max_chunk_size_bytes: 128 << 20,
         }
     }
 }

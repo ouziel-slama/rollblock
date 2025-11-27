@@ -41,7 +41,7 @@ let store = MhinStoreFacade::new(config)?;
 
 The store automatically creates these subdirectories:
 - `./data/metadata`: LMDB database for metadata
-- `./data/journal`: block journal (undo + redo payloads)
+- `./data/journal`: block journal stored as chunk files (`journal.00000001.bin`, `journal.00000002.bin`, …)
 - `./data/snapshots`: state snapshots
 
 ### Parallel Configuration
@@ -92,6 +92,19 @@ Choose parameters based on your workload:
 - `Operation { value: Value::empty() }` removes the key if it exists.
 - `store.get(key)` returns `Value::empty()` (an empty `Vec<u8>`) when the key is absent.
 - Use non-empty payloads for persisted data; the empty vector acts as a tombstone.
+
+### 6. journal_chunk_size_bytes - Journal Chunk Size
+
+- Default: `128 << 20` (128 MiB).
+- Controls how large each `journal/journal.XXXXXXXX.bin` file may grow before the store rotates to the next chunk.
+- Use `.with_journal_chunk_size(bytes)` on `StoreConfig` to override; larger chunks reduce rotation frequency, smaller chunks make tail repairs and manual inspection easier.
+
+```rust
+let config = StoreConfig::new("./data", 4, 1000, 1, false)
+    .with_journal_chunk_size(32 << 20); // 32 MiB chunks for tighter disk budgets
+```
+
+During rotation the old chunk is fsynced, the new file is created with `create_new`, and the parent directory is flushed so crash recovery can enumerate a consistent set of chunk files.
 
 ### Example: 80M Active Keys (Production)
 
@@ -500,6 +513,13 @@ store.close()?;
 - On restart, the store loads the latest snapshot **and** replays every fully committed block from the journal to reach the most recent `current_block`.
 - Blocks that never finished journaling are ignored, ensuring only complete blocks are restored.
 - Even if the process crashes before calling `close()`, committed blocks persist thanks to the redo data stored in the journal; the replay cost grows with the number of unsnapshotted blocks.
+
+### 6. Journal Chunk Rotation
+
+- Journal files live under `data_dir/journal/journal.XXXXXXXX.bin`. The numeric suffix is a monotonically increasing chunk id.
+- Chunks rotate automatically when they reach `StoreConfig::journal_chunk_size_bytes` (default 128 MiB). The current chunk is fsynced, the new chunk is created with `create_new`, and the parent directory is flushed so crash recovery can enumerate a consistent set.
+- Use `.with_journal_chunk_size(bytes)` to tune the limit. Smaller chunks make manual inspection safer and bound the amount of data to re-validate after a crash; larger chunks reduce rotation frequency on very fast disks.
+- Recovery enumerates all chunk files lexicographically, trims empty tail chunks, and rebuilds the index if needed, so operators never have to touch `journal.idx` manually.
 
 ## Complete Example
 

@@ -105,7 +105,7 @@ impl JournalHeader {
 }
 
 pub(crate) fn read_journal_block(file: &mut File, meta: &JournalMeta) -> StoreResult<JournalBlock> {
-    file.seek(SeekFrom::Start(meta.offset))?;
+    file.seek(SeekFrom::Start(meta.chunk_offset))?;
 
     let mut header_bytes = [0u8; JOURNAL_HEADER_SIZE];
     file.read_exact(&mut header_bytes)?;

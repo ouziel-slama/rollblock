@@ -10,12 +10,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ### Breaking Changes
 - **Read-only mode removed**: `StoreMode::ReadOnly`, `ReadOnlyBlockOrchestrator`, and all `open_read_only` variants have been removed. Use the new client/server model for read replicas instead.
 - **Values are now byte arrays**: Values changed from `u64` to arbitrary `Vec<u8>` (max 65,535 bytes). Empty vectors represent deletes, missing keys return empty vectors.
+- **Journal layout revamped**: `JournalMeta` now records `(chunk_id, chunk_offset)` pairs and the on-disk journal lives in chunked files (`journal.XXXXXXXX.bin`). Existing single-file journals are not compatible.
 
 ### Added
 - **Remote server**: New `RemoteStoreServer` with TLS (via `rustls`), Basic Auth, configurable timeouts, and connection limits. Embeddable via `StoreConfig::with_remote_server(...)`.
 - **Remote client**: New `RemoteStoreClient` for read replicas with automatic TLS verification, auth headers, and buffer reuse.
 - **Plaintext transport**: Optional `RemoteServerSecurity::Plain` and `ClientConfig::without_tls(...)` for trusted environments.
 - `network_client` example for client/server usage.
+- Journal chunking with atomic rotation, directory fsyncs, and crash-safe discovery.
+- `StoreConfig::with_journal_chunk_size(bytes)` for configuring the per-chunk size (default 128 MiB).
 
 ### Fixed
 - Snapshot scheduling under sustained load: new `max_snapshot_interval` ensures snapshots are forced when the persistence queue never fully drains.
@@ -23,6 +26,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ### Changed
 - Store directories now use exclusive locking only (no more shared locks).
 - `end_block` failures are now fatal: the store becomes unhealthy and requires reopening.
+- README and `docs/store_usage.md` now document chunk rotation, configuration, and directory layout.
 
 ## [0.1.0] - 2025-11-15
 

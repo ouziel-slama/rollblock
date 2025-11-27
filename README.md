@@ -14,6 +14,7 @@ A super-fast, rollbackable block-oriented key-value store.
 - Nearly as fast as a hashbrown HashMap in RAM and purpose-built for blockchain-style workloads.
 - Block-scoped, atomic updates keyed by monotonically increasing `BlockId`s.
 - zstd-compressed undo journal entries protected by Blake3 checksums.
+- Bounded journal chunks (128 MiB by default) that rotate monotonically, keeping on-disk files manageable.
 - Memory-mapped snapshots with checksum validation for fast restarts.
 - Configurable sharding with optional Rayon-based parallel execution.
 - Empty-value-as-delete semantics and a block-staging facade for complex workflows.
@@ -139,11 +140,20 @@ operations before falling back to the committed state.
 - `initial_capacity`: initial per-shard capacity; growth is automatic afterward.
 - `thread_count`: `1` for sequential execution, `>1` to enable Rayon-backed parallelism.
 - `use_compression`: enable zstd compression for the journal (default `false`).
+- `journal_chunk_size_bytes`: maximum size of each journal chunk before rotation. Defaults to `128 << 20` (128 MiB) and can be changed via `StoreConfig::with_journal_chunk_size(bytes)`.
 - `enable_server`: opt-in flag that starts the embedded remote server (default `false`).
   `.with_remote_server(...)` flips this on automatically.
 - `remote_server`: optional `RemoteServerSettings` describing the embedded server
   (defaults to `127.0.0.1:9443`, plaintext, `proto`/`proto` credentials) and only
   take effect when `enable_server` is `true`.
+
+The `journal/` directory contains chunk files named `journal.XXXXXXXX.bin`. Chunks
+rotate monotonically and are fsynced together with their parent directory when
+created, keeping recoveries bounded without requiring a single ever-growing file.
+Because filenames are fixed to eight digits, chunk IDs top out at `99_999_999`
+(~12.8 PB of persisted data with 128 MiB chunks). Operators who expect to exceed
+that upper bound should plan to recycle or archive old stores before hitting the
+limit.
 
 ### Advanced Configuration
 
@@ -157,6 +167,21 @@ let config = StoreConfig::new("./data", 4, 1000, 1, false)
 **Default**: 2GB (sufficient for Bitcoin mainnet and all testnets)
 **Recommended for Ethereum/Polygon**: 10GB
 **High-frequency chains**: 20GB+
+
+#### Journal Chunk Size
+
+Each journal chunk defaults to 128 MiB. Increase the limit if you want fewer,
+larger files or shrink it to make corruption checks quicker in environments with
+slow storage:
+
+```rust
+let config = StoreConfig::new("./data", 4, 1000, 1, false)
+    .with_journal_chunk_size(64 << 20); // 64 MiB chunks
+```
+
+Chunks are numbered monotonically (`journal.00000001.bin`, `journal.00000002.bin`, …).
+Rotation happens atomically: the current chunk is fsynced, the new file is created
+with `create_new`, and the directory entry is flushed before appends continue.
 
 ### Remote Server Settings
 

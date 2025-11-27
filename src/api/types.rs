@@ -619,8 +619,14 @@ pub struct ShardStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JournalMeta {
+    /// Block recorded by this journal entry.
     pub block_height: BlockId,
-    pub offset: u64,
+    /// Identifier of the chunk file that holds the entry.
+    pub chunk_id: u32,
+    /// Byte offset within the chunk file.
+    pub chunk_offset: u64,
+    /// Length of the compressed payload (excludes header).
     pub compressed_len: u64,
+    /// Blake3 checksum persisted alongside the header.
     pub checksum: u32,
 }

@@ -53,6 +53,8 @@ pub struct StoreConfig {
     pub compress_journal: bool,
     /// Compression level for zstd (when compression enabled)
     pub journal_compression_level: i32,
+    /// Maximum size of a single journal chunk before rotation.
+    pub journal_chunk_size_bytes: u64,
     /// LMDB map size in bytes (default: 2GB, sufficient for Bitcoin and testnets)
     pub lmdb_map_size: usize,
     /// Whether to launch the embedded remote server managed by the facade.
@@ -82,6 +84,7 @@ impl StoreConfig {
             max_snapshot_interval: Duration::from_secs(3600),
             compress_journal,
             journal_compression_level: 0,
+            journal_chunk_size_bytes: 128 << 20,
             lmdb_map_size: 2 << 30, // 2GB - sufficient for Bitcoin mainnet and all testnets
             enable_server: false,
             remote_server: Some(RemoteServerSettings::default()),
@@ -177,6 +180,15 @@ impl StoreConfig {
 
     pub fn with_journal_compression_level(mut self, level: i32) -> Self {
         self.journal_compression_level = level;
+        self
+    }
+
+    /// Sets the maximum on-disk size for a single journal chunk before rotation.
+    ///
+    /// Values below the size of a single entry (header + minimal payload) are clamped
+    /// when the journal is initialized, so tests may supply tiny values to stress rotation.
+    pub fn with_journal_chunk_size(mut self, bytes: u64) -> Self {
+        self.journal_chunk_size_bytes = bytes.max(1);
         self
     }
 
@@ -329,6 +341,10 @@ impl StoreConfig {
                     Ok(Some(recorded)) => recorded,
                     _ => fallback_map_size,
                 };
+
+                if let Ok(Some(chunk_size)) = metadata.load_journal_chunk_size() {
+                    config.journal_chunk_size_bytes = chunk_size;
+                }
             }
         }
 
@@ -447,7 +463,7 @@ fn default_worker_threads() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, tempdir_in};
 
     #[test]
     fn enable_remote_server_uses_existing_settings() {
@@ -475,5 +491,25 @@ mod tests {
     fn worker_thread_override_is_clamped() {
         let settings = RemoteServerSettings::default().with_worker_threads(0);
         assert_eq!(settings.worker_threads, 1);
+    }
+
+    #[test]
+    fn existing_config_uses_stored_chunk_size() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let data_dir = tmp.path();
+        let metadata_path = data_dir.join("metadata");
+        std::fs::create_dir_all(&metadata_path).unwrap();
+        let chunk_size = 32_u64 << 20;
+
+        let metadata = LmdbMetadataStore::new_with_map_size(&metadata_path, 1 << 20).unwrap();
+        metadata
+            .store_journal_chunk_size(chunk_size)
+            .expect("chunk size persisted");
+        drop(metadata);
+
+        let config = StoreConfig::existing(data_dir);
+        assert_eq!(config.journal_chunk_size_bytes, chunk_size);
     }
 }

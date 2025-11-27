@@ -105,6 +105,20 @@ impl MhinStoreFacade {
                 metadata.store_durability_mode(&config.durability_mode)?;
             }
         }
+        match metadata.load_journal_chunk_size()? {
+            Some(stored) if stored != config.journal_chunk_size_bytes => {
+                tracing::info!(
+                    stored_chunk_size = stored,
+                    configured_chunk_size = config.journal_chunk_size_bytes,
+                    "Configured journal chunk size overrides stored value; persisting new setting"
+                );
+                metadata.store_journal_chunk_size(config.journal_chunk_size_bytes)?;
+            }
+            Some(_) => {}
+            None => {
+                metadata.store_journal_chunk_size(config.journal_chunk_size_bytes)?;
+            }
+        }
         let sync_policy = match &config.durability_mode {
             crate::orchestrator::DurabilityMode::AsyncRelaxed {
                 sync_every_n_blocks,
@@ -119,6 +133,7 @@ impl MhinStoreFacade {
             compress: config.compress_journal,
             compression_level: config.journal_compression_level,
             sync_policy,
+            max_chunk_size_bytes: config.journal_chunk_size_bytes,
         };
         let journal = Arc::new(FileBlockJournal::with_options(
             config.journal_dir(),

@@ -3,7 +3,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::{Duration, Instant};
 
 use rollblock::types::Operation;
-use rollblock::{DurabilityMode, MhinStoreBlockFacade, MhinStoreError, StoreFacade, StoreResult};
+use rollblock::{
+    BlockJournal, DurabilityMode, FileBlockJournal, MhinStoreBlockFacade, MhinStoreError,
+    StoreFacade, StoreResult,
+};
 
 use super::e2e_support::{
     apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT,
@@ -16,6 +19,7 @@ fn e2e_checksum_corruption() -> StoreResult<()> {
     let harness = StoreHarness::builder("checksum-corruption")
         .durability_mode(DurabilityMode::Synchronous)
         .compress_journal(false)
+        .journal_chunk_size(64 << 20)
         .initial_capacity(64)
         .build();
     let store = harness.open()?;
@@ -33,15 +37,24 @@ fn e2e_checksum_corruption() -> StoreResult<()> {
     store.close()?;
     drop(store);
 
-    let journal_path = harness.data_dir().join("journal").join("journal.bin");
+    let journal_dir = harness.data_dir().join("journal");
+    let journal = FileBlockJournal::new(&journal_dir)?;
+    let meta = journal
+        .list_entries()?
+        .last()
+        .cloned()
+        .expect("at least one journal entry exists");
+    drop(journal);
+    let journal_path = journal_dir.join(format!("journal.{:08}.bin", meta.chunk_id));
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .open(&journal_path)?;
     let mut header = [0u8; 40];
+    file.seek(SeekFrom::Start(meta.chunk_offset))?;
     file.read_exact(&mut header)?;
     header[36] ^= 0xFF;
-    file.seek(SeekFrom::Start(36))?;
+    file.seek(SeekFrom::Start(meta.chunk_offset + 36))?;
     file.write_all(&header[36..40])?;
     file.sync_all()?;
     drop(file);
