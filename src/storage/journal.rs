@@ -518,9 +518,10 @@ pub trait BlockJournal: Send + Sync {
 }
 
 /// Controls when the journal syncs data to disk.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum SyncPolicy {
     /// Sync after every block (safest, slowest).
+    #[default]
     EveryBlock,
     /// Sync every N blocks (trade-off between safety and speed).
     EveryNBlocks {
@@ -543,12 +544,6 @@ impl Clone for SyncPolicy {
             },
             Self::Manual => Self::Manual,
         }
-    }
-}
-
-impl Default for SyncPolicy {
-    fn default() -> Self {
-        Self::EveryBlock
     }
 }
 
