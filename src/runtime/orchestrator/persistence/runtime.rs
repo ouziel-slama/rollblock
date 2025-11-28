@@ -12,6 +12,7 @@ use crate::metadata::MetadataStore;
 use crate::metrics::StoreMetrics;
 use crate::snapshot::Snapshotter;
 use crate::state_engine::StateEngine;
+use crate::state_shard::{RawTableShard, StateShard};
 use crate::types::{BlockId, JournalMeta};
 
 use super::block_undo_from_arc;
@@ -576,11 +577,12 @@ where
             SnapshotLockMode::NonBlocking => self.update_mutex.try_lock(),
         };
 
-        let Some(_guard) = guard else {
+        let Some(update_guard) = guard else {
             return Ok(false);
         };
 
         if !self.pending_blocks.is_empty() {
+            drop(update_guard);
             return Ok(false);
         }
 
@@ -588,13 +590,39 @@ where
         let applied = self.applied_block.load(Ordering::Acquire);
 
         if durable != applied {
+            drop(update_guard);
             return Ok(false);
         }
 
-        let shards = self.state_engine.snapshot_shards();
-        let path = self.snapshotter.create_snapshot(durable, &shards)?;
-        self.metadata.store_snapshot_watermark(durable)?;
-        tracing::info!(block = durable, path = ?path, "Snapshot created");
+        let snapshot_shards = self.clone_state_for_snapshot();
+        drop(update_guard);
+
+        self.write_snapshot(durable, snapshot_shards)
+    }
+
+    fn clone_state_for_snapshot(&self) -> Vec<Arc<dyn StateShard>> {
+        let source_shards = self.state_engine.snapshot_shards();
+        source_shards
+            .into_iter()
+            .enumerate()
+            .map(|(index, shard)| {
+                let data = shard.export_data();
+                let clone = RawTableShard::new(index, data.len());
+                clone.import_data(data);
+                let shard_arc: Arc<dyn StateShard> = Arc::new(clone);
+                shard_arc
+            })
+            .collect()
+    }
+
+    fn write_snapshot(
+        &self,
+        block: BlockId,
+        shards: Vec<Arc<dyn StateShard>>,
+    ) -> StoreResult<bool> {
+        let path = self.snapshotter.create_snapshot(block, &shards)?;
+        self.metadata.store_snapshot_watermark(block)?;
+        tracing::info!(block = block, path = ?path, "Snapshot created");
         Ok(true)
     }
 
