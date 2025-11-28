@@ -12,7 +12,7 @@ use rollblock::block_journal::{
     BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, SyncPolicy,
 };
 use rollblock::error::{MhinStoreError, StoreResult};
-use rollblock::metadata::MetadataStore;
+use rollblock::metadata::{GcWatermark, MetadataStore};
 use rollblock::snapshot::Snapshotter;
 use rollblock::state_shard::StateShard;
 use rollblock::types::{BlockId, BlockUndo, JournalMeta, Key, Operation, Value};
@@ -26,6 +26,8 @@ use rollblock::orchestrator::durability::{DurabilityMode, PersistenceSettings};
 pub struct MemoryMetadataStore {
     current: Mutex<BlockId>,
     offsets: Mutex<BTreeMap<BlockId, JournalMeta>>,
+    gc_watermark: Mutex<Option<GcWatermark>>,
+    snapshot_watermark: Mutex<Option<BlockId>>,
 }
 
 impl MemoryMetadataStore {
@@ -99,6 +101,44 @@ impl MetadataStore for MemoryMetadataStore {
         let _ = offsets.split_off(&start);
         Ok(())
     }
+
+    fn prune_journal_offsets_at_or_before(&self, block: BlockId) -> StoreResult<usize> {
+        let mut offsets = self.offsets.lock().unwrap();
+        if block == BlockId::MAX {
+            let removed = offsets.len();
+            offsets.clear();
+            return Ok(removed);
+        }
+
+        let split_key = block.saturating_add(1);
+        let retained = offsets.split_off(&split_key);
+        let removed = offsets.len();
+        *offsets = retained;
+        Ok(removed)
+    }
+
+    fn load_gc_watermark(&self) -> StoreResult<Option<GcWatermark>> {
+        Ok(self.gc_watermark.lock().unwrap().clone())
+    }
+
+    fn store_gc_watermark(&self, watermark: &GcWatermark) -> StoreResult<()> {
+        *self.gc_watermark.lock().unwrap() = Some(watermark.clone());
+        Ok(())
+    }
+
+    fn clear_gc_watermark(&self) -> StoreResult<()> {
+        *self.gc_watermark.lock().unwrap() = None;
+        Ok(())
+    }
+
+    fn load_snapshot_watermark(&self) -> StoreResult<Option<BlockId>> {
+        Ok(*self.snapshot_watermark.lock().unwrap())
+    }
+
+    fn store_snapshot_watermark(&self, block: BlockId) -> StoreResult<()> {
+        *self.snapshot_watermark.lock().unwrap() = Some(block);
+        Ok(())
+    }
 }
 
 impl MetadataStore for FailingMetadataStore {
@@ -124,6 +164,41 @@ impl MetadataStore for FailingMetadataStore {
 
     fn remove_journal_offsets_after(&self, block: BlockId) -> StoreResult<()> {
         <MemoryMetadataStore as MetadataStore>::remove_journal_offsets_after(&self.inner, block)
+    }
+
+    fn prune_journal_offsets_at_or_before(&self, block: BlockId) -> StoreResult<usize> {
+        let mut failed = self.failed.lock().unwrap();
+        if block == self.fail_block && !*failed {
+            *failed = true;
+            return Err(MhinStoreError::Io(Error::other(
+                "simulated metadata failure",
+            )));
+        }
+        drop(failed);
+        <MemoryMetadataStore as MetadataStore>::prune_journal_offsets_at_or_before(
+            &self.inner,
+            block,
+        )
+    }
+
+    fn load_gc_watermark(&self) -> StoreResult<Option<GcWatermark>> {
+        <MemoryMetadataStore as MetadataStore>::load_gc_watermark(&self.inner)
+    }
+
+    fn store_gc_watermark(&self, watermark: &GcWatermark) -> StoreResult<()> {
+        <MemoryMetadataStore as MetadataStore>::store_gc_watermark(&self.inner, watermark)
+    }
+
+    fn clear_gc_watermark(&self) -> StoreResult<()> {
+        <MemoryMetadataStore as MetadataStore>::clear_gc_watermark(&self.inner)
+    }
+
+    fn load_snapshot_watermark(&self) -> StoreResult<Option<BlockId>> {
+        <MemoryMetadataStore as MetadataStore>::load_snapshot_watermark(&self.inner)
+    }
+
+    fn store_snapshot_watermark(&self, block: BlockId) -> StoreResult<()> {
+        <MemoryMetadataStore as MetadataStore>::store_snapshot_watermark(&self.inner, block)
     }
 
     fn record_block_commit(&self, block: BlockId, meta: &JournalMeta) -> StoreResult<()> {
@@ -369,6 +444,8 @@ pub fn synchronous_settings() -> PersistenceSettings {
         durability_mode: DurabilityMode::Synchronous,
         snapshot_interval: Duration::from_secs(3600),
         max_snapshot_interval: Duration::from_secs(3600),
+        min_rollback_window: BlockId::MAX,
+        prune_interval: Duration::from_secs(10),
     }
 }
 
@@ -377,6 +454,8 @@ pub fn async_settings(max_pending_blocks: usize) -> PersistenceSettings {
         durability_mode: DurabilityMode::Async { max_pending_blocks },
         snapshot_interval: Duration::from_secs(3600),
         max_snapshot_interval: Duration::from_secs(3600),
+        min_rollback_window: BlockId::MAX,
+        prune_interval: Duration::from_secs(10),
     }
 }
 

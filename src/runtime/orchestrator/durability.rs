@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::types::BlockId;
+
 /// Operating mode for block durability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DurabilityMode {
@@ -95,6 +97,8 @@ pub struct PersistenceSettings {
     pub durability_mode: DurabilityMode,
     pub snapshot_interval: Duration,
     pub max_snapshot_interval: Duration,
+    pub min_rollback_window: BlockId,
+    pub prune_interval: Duration,
 }
 
 impl Default for PersistenceSettings {
@@ -103,6 +107,8 @@ impl Default for PersistenceSettings {
             durability_mode: DurabilityMode::default(),
             snapshot_interval: Duration::from_secs(3600),
             max_snapshot_interval: Duration::from_secs(3600),
+            min_rollback_window: BlockId::MAX,
+            prune_interval: Duration::from_secs(10),
         }
     }
 }

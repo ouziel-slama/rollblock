@@ -167,7 +167,7 @@ mod facade_tests {
     use crate::block_journal::{
         BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, SyncPolicy,
     };
-    use crate::metadata::{LmdbMetadataStore, MetadataStore};
+    use crate::metadata::{GcWatermark, LmdbMetadataStore, MetadataStore};
     use crate::snapshot::Snapshotter;
     use crate::types::{BlockUndo, JournalMeta, ValueBuf};
     use crate::{
@@ -594,6 +594,8 @@ mod facade_tests {
     struct StubMetadata {
         current_block: Mutex<BlockId>,
         offsets: Mutex<HashMap<BlockId, JournalMeta>>,
+        gc_watermark: Mutex<Option<GcWatermark>>,
+        snapshot_watermark: Mutex<Option<BlockId>>,
     }
 
     impl MetadataStore for StubMetadata {
@@ -647,6 +649,43 @@ mod facade_tests {
                 .lock()
                 .unwrap()
                 .retain(|&height, _| height <= block);
+            Ok(())
+        }
+
+        fn prune_journal_offsets_at_or_before(&self, block: BlockId) -> StoreResult<usize> {
+            let mut offsets = self.offsets.lock().unwrap();
+            let mut removed = 0usize;
+            offsets.retain(|&height, _| {
+                if height <= block {
+                    removed += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            Ok(removed)
+        }
+
+        fn load_gc_watermark(&self) -> StoreResult<Option<GcWatermark>> {
+            Ok(self.gc_watermark.lock().unwrap().clone())
+        }
+
+        fn store_gc_watermark(&self, watermark: &GcWatermark) -> StoreResult<()> {
+            *self.gc_watermark.lock().unwrap() = Some(watermark.clone());
+            Ok(())
+        }
+
+        fn clear_gc_watermark(&self) -> StoreResult<()> {
+            *self.gc_watermark.lock().unwrap() = None;
+            Ok(())
+        }
+
+        fn load_snapshot_watermark(&self) -> StoreResult<Option<BlockId>> {
+            Ok(*self.snapshot_watermark.lock().unwrap())
+        }
+
+        fn store_snapshot_watermark(&self, block: BlockId) -> StoreResult<()> {
+            *self.snapshot_watermark.lock().unwrap() = Some(block);
             Ok(())
         }
     }
@@ -713,6 +752,7 @@ mod facade_tests {
         thread_count: usize,
     ) -> StoreConfig {
         StoreConfig::new(data_dir, shards, initial_capacity, thread_count, false)
+            .expect("valid test config")
             .with_lmdb_map_size(TEST_LMDB_MAP_SIZE)
             .without_remote_server()
     }

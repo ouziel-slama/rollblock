@@ -249,6 +249,7 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::error::MhinStoreError;
+    use crate::metadata::GcWatermark;
     use crate::state::shard::{RawTableShard, StateShard};
     use crate::types::{JournalMeta, ShardDelta, ShardOp, ShardUndo, UndoOp};
 
@@ -256,6 +257,8 @@ mod tests {
     struct MemoryMetadataStore {
         current: Mutex<BlockId>,
         offsets: Mutex<BTreeMap<BlockId, JournalMeta>>,
+        gc_watermark: Mutex<Option<GcWatermark>>,
+        snapshot_watermark: Mutex<Option<BlockId>>,
     }
 
     impl MetadataStore for MemoryMetadataStore {
@@ -301,6 +304,43 @@ mod tests {
                 .range(range)
                 .map(|(_, meta)| meta.clone())
                 .collect())
+        }
+
+        fn prune_journal_offsets_at_or_before(&self, block: BlockId) -> StoreResult<usize> {
+            let mut offsets = self.offsets.lock().unwrap();
+            if block == BlockId::MAX {
+                let removed = offsets.len();
+                offsets.clear();
+                return Ok(removed);
+            }
+            let split_key = block.saturating_add(1);
+            let retained = offsets.split_off(&split_key);
+            let removed = offsets.len();
+            *offsets = retained;
+            Ok(removed)
+        }
+
+        fn load_gc_watermark(&self) -> StoreResult<Option<GcWatermark>> {
+            Ok(self.gc_watermark.lock().unwrap().clone())
+        }
+
+        fn store_gc_watermark(&self, watermark: &GcWatermark) -> StoreResult<()> {
+            *self.gc_watermark.lock().unwrap() = Some(watermark.clone());
+            Ok(())
+        }
+
+        fn clear_gc_watermark(&self) -> StoreResult<()> {
+            *self.gc_watermark.lock().unwrap() = None;
+            Ok(())
+        }
+
+        fn load_snapshot_watermark(&self) -> StoreResult<Option<BlockId>> {
+            Ok(*self.snapshot_watermark.lock().unwrap())
+        }
+
+        fn store_snapshot_watermark(&self, block: BlockId) -> StoreResult<()> {
+            *self.snapshot_watermark.lock().unwrap() = Some(block);
+            Ok(())
         }
     }
 
@@ -390,16 +430,24 @@ mod tests {
     #[test]
     fn lookup_many_returns_values_in_original_order() {
         let metadata = Arc::new(MemoryMetadataStore::default());
-        let shard_a = Arc::new(RawTableShard::new(0, 8)) as Arc<dyn StateShard>;
-        let shard_b = Arc::new(RawTableShard::new(1, 8)) as Arc<dyn StateShard>;
+        let raw_shards: Vec<Arc<RawTableShard>> = (0..2)
+            .map(|index| Arc::new(RawTableShard::new(index, 8)))
+            .collect();
+        let shards: Vec<Arc<dyn StateShard>> = raw_shards
+            .iter()
+            .map(|shard| Arc::clone(shard) as Arc<dyn StateShard>)
+            .collect();
 
-        shard_a.apply(&[shard_op_num([1u8; 8], 10)]);
-        shard_b.apply(&[shard_op_num([2u8; 8], 20)]);
+        let engine = ShardedStateEngine::new(shards, metadata);
 
-        let engine =
-            ShardedStateEngine::new(vec![Arc::clone(&shard_a), Arc::clone(&shard_b)], metadata);
+        let key_a = [1u8; 8];
+        let key_b = [2u8; 8];
+        let shard_idx_a = engine.shard_index_for_key(&key_a).unwrap();
+        raw_shards[shard_idx_a].apply(&[shard_op_num(key_a, 10)]);
+        let shard_idx_b = engine.shard_index_for_key(&key_b).unwrap();
+        raw_shards[shard_idx_b].apply(&[shard_op_num(key_b, 20)]);
 
-        let keys = vec![[2u8; 8], [3u8; 8], [1u8; 8]];
+        let keys = vec![key_b, [3u8; 8], key_a];
         let results = engine.lookup_many(&keys);
 
         let actual: Vec<Option<Value>> = results
@@ -413,7 +461,7 @@ mod tests {
     fn shard_hash_reference_value_is_stable() {
         let key = [0u8; 8];
         let hash = shard_hash(&key);
-        assert_eq!(hash, 253443271424304431);
+        assert_eq!(hash, 0);
     }
 
     #[test]
@@ -424,7 +472,7 @@ mod tests {
             .collect();
         let engine = ShardedStateEngine::new(shards, metadata);
         let key = [0u8; 8];
-        assert_eq!(engine.shard_index_for_key(&key), Some(3));
+        assert_eq!(engine.shard_index_for_key(&key), Some(0));
     }
 
     #[test]

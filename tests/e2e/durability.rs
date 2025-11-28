@@ -352,6 +352,7 @@ fn e2e_sync_empty_block_crash_helper() -> StoreResult<()> {
     // Apply an empty block and crash intentionally so the parent process can
     // assert that synchronous durability preserves the block height.
     let mut config = StoreConfig::new(&data_dir, 4, 64, 1, false)
+        .expect("valid config")
         .with_lmdb_map_size(HARNESS_LMDB_MAP_SIZE)
         .without_remote_server();
     config.durability_mode = DurabilityMode::Synchronous;
@@ -431,6 +432,7 @@ fn e2e_async_relaxed_crash_helper() -> StoreResult<()> {
     }
 
     let mut config = StoreConfig::new(&data_dir, 4, 64, 1, false)
+        .expect("valid config")
         .with_lmdb_map_size(HARNESS_LMDB_MAP_SIZE)
         .without_remote_server();
     config.durability_mode = DurabilityMode::Async {

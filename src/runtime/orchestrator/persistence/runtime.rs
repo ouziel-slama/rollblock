@@ -14,6 +14,7 @@ use crate::snapshot::Snapshotter;
 use crate::state_engine::StateEngine;
 use crate::types::{BlockId, JournalMeta};
 
+use super::block_undo_from_arc;
 use super::pending_blocks::PendingBlocks;
 use super::queue::PersistenceQueue;
 use super::task::{PersistenceTask, TaskStatus};
@@ -170,6 +171,9 @@ where
     pub fn cancel_after(&self, block_height: BlockId) -> Vec<Arc<PersistenceTask>> {
         let cancelled = self.queue.cancel_after(block_height);
         if !cancelled.is_empty() {
+            for task in &cancelled {
+                task.release_undo();
+            }
             self.flush_cv.notify_all();
         }
         cancelled
@@ -205,6 +209,7 @@ where
 
             match result {
                 Ok(PersistOutcome::Committed { synced }) => {
+                    task.release_undo();
                     let _ = self.pending_blocks.pop_front(task.block_height);
                     if synced {
                         self.durable_block
@@ -224,9 +229,10 @@ where
                     self.flush_cv.notify_all();
                 }
                 Ok(PersistOutcome::Skipped) => {
-                    if let Some(undo) = self.pending_blocks.pop_front(task.block_height) {
-                        if let Err(err) = self.state_engine.revert(task.block_height, undo.clone())
-                        {
+                    task.release_undo();
+                    if let Some(undo_arc) = self.pending_blocks.pop_front(task.block_height) {
+                        let undo = block_undo_from_arc(undo_arc);
+                        if let Err(err) = self.state_engine.revert(task.block_height, undo) {
                             tracing::error!(
                                 block_height = task.block_height,
                                 ?err,
@@ -244,6 +250,7 @@ where
                     continue;
                 }
                 Err(err) => {
+                    task.release_undo();
                     self.handle_persist_failure(task, err);
                     break;
                 }
@@ -407,9 +414,10 @@ where
     }
 
     fn persist_block(&self, task: &PersistenceTask) -> StoreResult<PersistOutcome> {
+        let undo = task.clone_undo();
         let append_outcome =
             self.journal
-                .append(task.block_height, &task.undo, &task.operations)?;
+                .append(task.block_height, undo.as_ref(), &task.operations)?;
 
         let rollback_barrier = self.rollback_barrier.load(Ordering::Acquire);
         if task.block_height > rollback_barrier {
@@ -479,24 +487,39 @@ where
         }
 
         // Remove the failed block from pending bookkeeping before reverting.
-        let _ = self.pending_blocks.pop_front(block);
-
-        if let Err(revert_err) = self.state_engine.revert(block, task.undo.clone()) {
-            tracing::error!(
-                block_height = block,
-                ?revert_err,
-                "Failed to revert state after durability failure"
-            );
+        let failed_undo = self.pending_blocks.pop_front(block);
+        if let Some(undo_arc) = failed_undo {
+            let undo = block_undo_from_arc(undo_arc);
+            if let Err(revert_err) = self.state_engine.revert(block, undo) {
+                tracing::error!(
+                    block_height = block,
+                    ?revert_err,
+                    "Failed to revert state after durability failure"
+                );
+            }
         }
 
         task.set_status(TaskStatus::Completed(Err(Arc::new(err))));
 
+        // Stop further processing and wake any waiting threads.
+        self.queue.stop();
+        self.stop.store(true, Ordering::Release);
+        self.flush_cv.notify_all();
+        self.signal_snapshot_shutdown();
+
+        // Drain any queued tasks so we can drop their undo references.
+        let drained_tasks = self.queue.drain();
+        for pending in &drained_tasks {
+            pending.release_undo();
+        }
+
         // Revert any still-pending blocks beyond the failed one.
         let remaining_undos = self.pending_blocks.drain();
         self.clear_pending_metadata();
-        for undo in remaining_undos.into_iter().rev() {
-            let revert_block = undo.block_height;
-            if let Err(revert_err) = self.state_engine.revert(revert_block, undo.clone()) {
+        for undo_arc in remaining_undos.into_iter().rev() {
+            let revert_block = undo_arc.block_height;
+            let undo = block_undo_from_arc(undo_arc);
+            if let Err(revert_err) = self.state_engine.revert(revert_block, undo) {
                 tracing::error!(
                     block_height = revert_block,
                     ?revert_err,
@@ -528,14 +551,7 @@ where
         self.metrics
             .update_key_count(self.state_engine.total_keys());
 
-        // Stop further processing and wake any waiting threads.
-        self.queue.stop();
-        self.stop.store(true, Ordering::Release);
-        self.flush_cv.notify_all();
-        self.signal_snapshot_shutdown();
-
-        // Drain any queued tasks and notify them of the failure.
-        let drained_tasks = self.queue.drain();
+        // Notify drained tasks of the failure.
         for pending in drained_tasks {
             pending.set_status(TaskStatus::Completed(Err(Arc::new(
                 MhinStoreError::DurabilityFailure {
@@ -577,6 +593,7 @@ where
 
         let shards = self.state_engine.snapshot_shards();
         let path = self.snapshotter.create_snapshot(durable, &shards)?;
+        self.metadata.store_snapshot_watermark(durable)?;
         tracing::info!(block = durable, path = ?path, "Snapshot created");
         Ok(true)
     }

@@ -7,13 +7,37 @@ use crate::error::{MhinStoreError, StoreResult};
 use crate::metadata::MetadataStore;
 use crate::snapshot::Snapshotter;
 use crate::state_engine::StateEngine;
+use crate::storage::journal::{JournalPruneReport, JournalPruner};
 use crate::types::{BlockId, BlockUndo, JournalMeta, Key, Operation, Value};
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 use super::durability::PersistenceSettings;
-use super::persistence::{ApplyMetricsContext, PersistenceContext, PersistenceTask};
+use super::persistence::{
+    block_undo_from_arc, ApplyMetricsContext, PersistenceContext, PersistenceTask,
+};
 
 type Shared<T> = Arc<T>;
+
+#[derive(Clone)]
+struct PruneNowHandle<J, M> {
+    pruner: JournalPruner<J, M>,
+    gate: Shared<Mutex<()>>,
+}
+
+impl<J, M> PruneNowHandle<J, M>
+where
+    J: BlockJournal + 'static,
+    M: MetadataStore + 'static,
+{
+    fn new(pruner: JournalPruner<J, M>, gate: Shared<Mutex<()>>) -> Self {
+        Self { pruner, gate }
+    }
+
+    fn prune_now(&self) -> StoreResult<Option<JournalPruneReport>> {
+        let _guard = self.gate.lock();
+        self.pruner.prune_now()
+    }
+}
 
 pub struct DefaultBlockOrchestrator<E, J, S, M>
 where
@@ -29,6 +53,9 @@ where
     update_mutex: Shared<Mutex<()>>,
     reader_gate: Shared<RwLock<()>>,
     persistence: PersistenceContext<E, J, S, M>,
+    pruner: Option<JournalPruner<J, M>>,
+    prune_now_handle: Option<PruneNowHandle<J, M>>,
+    prune_gate: Shared<Mutex<()>>,
     fatal_error: Mutex<Option<(BlockId, String)>>,
     sync_metadata_interval: AtomicUsize,
     pending_metadata: Mutex<Vec<(BlockId, JournalMeta)>>,
@@ -50,6 +77,7 @@ where
     ) -> StoreResult<Self> {
         let update_mutex = Shared::new(Mutex::new(()));
         let reader_gate = Shared::new(RwLock::new(()));
+        let prune_gate = Shared::new(Mutex::new(()));
 
         Self::apply_initial_sync_policy(&journal, &persistence_settings);
 
@@ -61,6 +89,27 @@ where
             Arc::clone(&update_mutex),
             &persistence_settings,
         )?;
+
+        let pruner = if persistence_settings.min_rollback_window == BlockId::MAX {
+            None
+        } else {
+            let durable_tracker = persistence.durable_block_tracker();
+            let journal_for_pruner = Arc::clone(&journal);
+            let metadata_for_pruner = Arc::clone(&metadata);
+            let pruner = JournalPruner::spawn(
+                journal_for_pruner,
+                metadata_for_pruner,
+                persistence_settings.min_rollback_window,
+                persistence_settings.prune_interval,
+                move || durable_tracker.load(Ordering::Acquire),
+                None,
+            );
+            pruner.resume_pending_work()?;
+            Some(pruner)
+        };
+        let prune_now_handle = pruner
+            .as_ref()
+            .map(|pruner| PruneNowHandle::new(pruner.clone(), Arc::clone(&prune_gate)));
 
         let initial_metadata_interval = if persistence.is_async() {
             0
@@ -76,6 +125,9 @@ where
             update_mutex,
             reader_gate,
             persistence,
+            pruner,
+            prune_now_handle,
+            prune_gate,
             fatal_error: Mutex::new(None),
             sync_metadata_interval: AtomicUsize::new(initial_metadata_interval),
             pending_metadata: Mutex::new(Vec::new()),
@@ -88,6 +140,14 @@ where
             journal.set_sync_policy(SyncPolicy::EveryBlock);
         } else {
             journal.set_sync_policy(SyncPolicy::every_n_blocks(sync_every_n));
+        }
+    }
+
+    pub fn prune_now(&self) -> StoreResult<Option<JournalPruneReport>> {
+        if let Some(handle) = &self.prune_now_handle {
+            handle.prune_now()
+        } else {
+            Ok(None)
         }
     }
 
@@ -186,13 +246,20 @@ where
         if self.persistence.is_async() {
             self.persistence.set_rollback_barrier(block_height);
 
-            let block_undo = BlockUndo {
+            let block_undo = Arc::new(BlockUndo {
                 block_height,
                 shard_undos: Vec::new(),
-            };
-            self.persistence.pending_blocks().push(block_undo.clone());
+            });
+            self.persistence
+                .pending_blocks()
+                .push(Arc::clone(&block_undo));
 
-            let task = PersistenceTask::new(block_height, Vec::new(), block_undo, metrics_context);
+            let task = PersistenceTask::new(
+                block_height,
+                Vec::new(),
+                Arc::clone(&block_undo),
+                metrics_context,
+            );
 
             mutation_guard.take();
             let enqueue_result = self.persistence.enqueue(task);
@@ -201,9 +268,11 @@ where
             if let Err(err) = enqueue_result {
                 self.persistence.pending_blocks().pop_latest(block_height);
                 self.persistence.metrics().record_failure();
+                drop(block_undo);
                 return Err(err);
             }
 
+            drop(block_undo);
             self.persistence.set_applied_block(block_height);
             tracing::info!(
                 block_height,
@@ -279,6 +348,7 @@ where
         tracing::debug!("Journal prepared");
 
         let (stats, block_undo) = self.state_engine.commit(block_height, delta)?;
+        let block_undo = Arc::new(block_undo);
         tracing::debug!(
             operations = stats.operation_count,
             modified_keys = stats.modified_keys,
@@ -287,9 +357,11 @@ where
 
         let persist_result = if self.persistence.is_async() {
             self.persistence.set_rollback_barrier(block_height);
-            let queued_undo = block_undo.clone();
-            self.persistence.pending_blocks().push(queued_undo.clone());
-            let task = PersistenceTask::new(block_height, ops, queued_undo, metrics_context);
+            self.persistence
+                .pending_blocks()
+                .push(Arc::clone(&block_undo));
+            let task =
+                PersistenceTask::new(block_height, ops, Arc::clone(&block_undo), metrics_context);
 
             mutation_guard.take();
             let enqueue_result = self.persistence.enqueue(task);
@@ -297,7 +369,7 @@ where
 
             enqueue_result
         } else {
-            self.persist_synchronously(block_height, &block_undo, &ops)
+            self.persist_synchronously(block_height, block_undo.as_ref(), &ops)
         };
 
         if let Err(err) = persist_result {
@@ -308,6 +380,7 @@ where
                 stats.operation_count,
             );
         }
+        drop(block_undo);
 
         self.persistence.set_applied_block(block_height);
 
@@ -360,7 +433,7 @@ where
     fn handle_persistence_error(
         &self,
         block_height: BlockId,
-        block_undo: BlockUndo,
+        block_undo: Arc<BlockUndo>,
         err: MhinStoreError,
         operation_count: usize,
     ) -> StoreResult<()> {
@@ -372,7 +445,8 @@ where
             self.set_fatal_error(block_height, err.to_string());
         }
 
-        let revert_result = self.state_engine.revert(block_height, block_undo);
+        let undo = block_undo_from_arc(block_undo);
+        let revert_result = self.state_engine.revert(block_height, undo);
         if let Err(revert_err) = revert_result {
             tracing::error!(
                 block_height,
@@ -434,12 +508,14 @@ where
 
         let pending_reverts = self.persistence.pending_blocks().pop_until(block);
         if !pending_reverts.is_empty() {
-            for undo in pending_reverts {
+            for undo_arc in pending_reverts {
+                let revert_block = undo_arc.block_height;
                 tracing::debug!(
-                    block_height = undo.block_height,
+                    block_height = revert_block,
                     "Reverting pending block above rollback target"
                 );
-                self.state_engine.revert(undo.block_height, undo)?;
+                let undo = block_undo_from_arc(undo_arc);
+                self.state_engine.revert(revert_block, undo)?;
             }
         }
 
@@ -636,6 +712,10 @@ where
     fn shutdown(&self) -> StoreResult<()> {
         let _guard = self.update_mutex.lock();
         self.check_health()?;
+        let _prune_guard = self.prune_gate.lock();
+        if let Some(pruner) = &self.pruner {
+            pruner.shutdown();
+        }
         let _reader_guard = self.reader_gate.write();
         self.persistence.flush()?;
         if !self.persistence.is_async() {
@@ -651,6 +731,7 @@ where
 
         let shards = self.state_engine.snapshot_shards();
         let snapshot_path = self.snapshotter.create_snapshot(durable_block, &shards)?;
+        self.metadata.store_snapshot_watermark(durable_block)?;
 
         tracing::info!(
             block_height = durable_block,
@@ -696,5 +777,20 @@ where
             self.flush_sync_pending_metadata()?;
         }
         Ok(())
+    }
+}
+
+impl<E, J, S, M> Drop for DefaultBlockOrchestrator<E, J, S, M>
+where
+    E: StateEngine + 'static,
+    J: BlockJournal + 'static,
+    S: Snapshotter + 'static,
+    M: MetadataStore + 'static,
+{
+    fn drop(&mut self) {
+        if let Some(pruner) = &self.pruner {
+            let _guard = self.prune_gate.lock();
+            pruner.shutdown();
+        }
     }
 }

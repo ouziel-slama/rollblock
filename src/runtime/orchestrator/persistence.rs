@@ -8,7 +8,7 @@ mod queue;
 pub mod runtime;
 mod task;
 
-pub use pending_blocks::PendingBlocks;
+pub use pending_blocks::{block_undo_from_arc, PendingBlocks};
 pub use task::{ApplyMetricsContext, PersistenceTask};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -127,6 +127,10 @@ where
 
     pub fn durable_block_height(&self) -> BlockId {
         self.durable_block.load(Ordering::Acquire)
+    }
+
+    pub fn durable_block_tracker(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.durable_block)
     }
 
     pub fn applied_block_height(&self) -> BlockId {

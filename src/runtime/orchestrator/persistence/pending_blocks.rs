@@ -1,12 +1,13 @@
 use parking_lot::Mutex;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::types::{BlockId, BlockUndo};
 
 /// Thread-safe pending block undo stack used by asynchronous persistence.
 #[derive(Debug, Default)]
 pub struct PendingBlocks {
-    inner: Mutex<VecDeque<BlockUndo>>,
+    inner: Mutex<VecDeque<Arc<BlockUndo>>>,
 }
 
 impl PendingBlocks {
@@ -16,7 +17,7 @@ impl PendingBlocks {
         }
     }
 
-    pub fn push(&self, undo: BlockUndo) {
+    pub fn push(&self, undo: Arc<BlockUndo>) {
         self.inner.lock().push_back(undo);
     }
 
@@ -24,7 +25,7 @@ impl PendingBlocks {
         self.inner.lock().is_empty()
     }
 
-    pub fn pop_latest(&self, block_height: BlockId) -> Option<BlockUndo> {
+    pub fn pop_latest(&self, block_height: BlockId) -> Option<Arc<BlockUndo>> {
         let mut guard = self.inner.lock();
         if let Some(last) = guard.back() {
             if last.block_height == block_height {
@@ -34,7 +35,7 @@ impl PendingBlocks {
         None
     }
 
-    pub fn pop_until(&self, target: BlockId) -> Vec<BlockUndo> {
+    pub fn pop_until(&self, target: BlockId) -> Vec<Arc<BlockUndo>> {
         let mut guard = self.inner.lock();
         let mut removed = Vec::new();
 
@@ -50,7 +51,7 @@ impl PendingBlocks {
         removed
     }
 
-    pub fn pop_front(&self, block_height: BlockId) -> Option<BlockUndo> {
+    pub fn pop_front(&self, block_height: BlockId) -> Option<Arc<BlockUndo>> {
         let mut guard = self.inner.lock();
         if let Some(front) = guard.front() {
             if front.block_height == block_height {
@@ -60,8 +61,12 @@ impl PendingBlocks {
         None
     }
 
-    pub fn drain(&self) -> Vec<BlockUndo> {
+    pub fn drain(&self) -> Vec<Arc<BlockUndo>> {
         let mut guard = self.inner.lock();
         guard.drain(..).collect()
     }
+}
+
+pub fn block_undo_from_arc(undo: Arc<BlockUndo>) -> BlockUndo {
+    Arc::try_unwrap(undo).unwrap_or_else(|shared| shared.as_ref().clone())
 }

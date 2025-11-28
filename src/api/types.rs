@@ -617,7 +617,7 @@ pub struct ShardStats {
     pub tombstones: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct JournalMeta {
     /// Block recorded by this journal entry.
     pub block_height: BlockId,

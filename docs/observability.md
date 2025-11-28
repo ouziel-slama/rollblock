@@ -18,7 +18,7 @@ Get metrics from the store facade:
 ```rust
 use rollblock::{MhinStoreFacade, StoreConfig};
 
-let config = StoreConfig::new("./data", 4, 1000, 1, false).enable_remote_server()?;
+let config = StoreConfig::new("./data", 4, 1000, 1, false)?.enable_remote_server()?;
 let store = MhinStoreFacade::new(config)?;
 
 // Access metrics
@@ -126,10 +126,10 @@ if let Some(health) = store.health() {
 ### Health Criteria
 
 A store is considered:
-- **Healthy** if: No errors AND recent activity (< 60 seconds)
-- **Idle** if: No errors AND no recent activity
-- **Degraded** if: Has checksum errors but otherwise functional
-- **Unhealthy** if: Has failed operations
+- **Healthy** if: no failed operations, no checksum errors, and activity in the last 60 seconds.
+- **Idle** if: no failed operations or checksum errors, but no recent activity.
+- **Degraded** if: any checksum errors have been recorded (even if failures also exist).
+- **Unhealthy** if: there are failed operations but no checksum errors (checksum errors always map to `Degraded` first).
 
 ## Structured Logging with Tracing
 
@@ -176,35 +176,57 @@ RUST_LOG=rollblock=trace cargo run
 **INFO level** - Block operations:
 ```
 2025-11-07T22:47:07.328991Z INFO apply_operations: Block applied successfully 
-  block_height=1 operations=10 modified_keys=10 duration_ms=25
+  block_height=1 operations=10 modified_keys=10
 ```
 
 **DEBUG level** - Internal steps:
 ```
 2025-11-07T22:47:07.328991Z DEBUG apply_operations: Acquiring mutation mutex
-2025-11-07T22:47:07.329123Z DEBUG apply_operations: Current block retrieved current_block=0
 2025-11-07T22:47:07.329234Z DEBUG apply_operations: Preparing journal
+2025-11-07T22:47:07.329256Z DEBUG apply_operations: Journal prepared
 2025-11-07T22:47:07.329567Z DEBUG apply_operations: State committed operations=10 modified_keys=10
 ```
 
 **TRACE level** - Individual lookups:
 ```
-2025-11-07T22:47:07.364123Z TRACE fetch: Lookup performed 
-  key=[1,0,0,0,0,0,0,0] found=true duration_us=42
+2025-11-07T22:47:07.364123Z TRACE fetch_many: Lookup batch executed
+  key_count=1 duration_us=42
 ```
+
+### Background Pruner Telemetry
+
+The journal pruner emits structured logs every iteration so operators can confirm
+that retention stays within policy:
+
+- `journal_prune_success` (level `INFO`): includes `pruned_through`,
+  `chunks_removed`, `entries_removed`, `bytes_freed`, `duration_ms`, and whether
+  the iteration was triggered by the background loop, an internal/manual
+  `prune_now()` (used in tests), or crash recovery.
+- `journal_pruner_nop` (level `INFO`): fired when no sealed chunks qualified for
+  pruning. Seeing repeated no-ops usually means you just reached the configured
+  window and should expect deletions once more blocks accumulate.
+- `pruner_clamped_by_snapshot` (level `WARN`): indicates the most recent snapshot
+  watermark forced the pruner to stop early. Either take a new snapshot or widen
+  the rollback window if you routinely see this event.
+- `journal_pruner_iteration_failed` (level `ERROR`): captures any IO/metadata
+  failure along with the error. The `gc_watermark` entry remains in LMDB until
+  the work is retried successfully.
+
+You can inspect the `metadata/gc_watermark` tree with tooling like `mdb_dump` to
+see whether a plan is in flight. On restart the pruner replays that plan before
+writers come back online, so a non-empty watermark combined with the absence of
+`journal_prune_success` logs usually points to a crash in the middle of a prune.
 
 ### Structured Fields
 
 All logs include structured fields that can be parsed by log aggregators:
 
-- `block_height` - Block number
-- `ops_count` - Number of operations
-- `operations` - Operations processed
+- `block_height` - Block number (`apply_operations` spans)
+- `ops_count` - Number of operations provided to the block
+- `operations` - Operations applied after planning
 - `modified_keys` - Keys affected
-- `duration_ms` / `duration_us` - Timing information
-- `target_block` - Rollback target
-- `offset` - Journal offset
-- `compressed_len` - Compressed data size
+- `duration_ms` / `duration_us` - Timing information (apply/rollback vs lookups)
+- `target_block` - Rollback target in `revert_to`
 
 ### JSON Output
 
@@ -327,7 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Create store
-    let config = StoreConfig::new("./data", 4, 1000, 1, false);
+    let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
     let store = MhinStoreFacade::new(config)?;
 
     // Start metrics exporter thread
@@ -393,7 +415,7 @@ If P95/P99 latencies are high:
 
 ## See Also
 
-- [Architecture Documentation](store_architecture.md)
-- [Usage Guide](store_usage.md)
+- [Architecture Documentation](architecture.md)
+- [Examples](examples.md)
 - [Observability Example](../examples/observability.rs)
 

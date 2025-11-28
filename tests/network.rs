@@ -6,7 +6,7 @@ use rcgen::generate_simple_self_signed;
 use rollblock::client::{ClientConfig, ClientError, RemoteStoreClient};
 use rollblock::net::BasicAuthConfig;
 use rollblock::types::Operation;
-use rollblock::{MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade};
+use rollblock::{MhinStoreError, MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade};
 
 fn bytes_to_u64_le(bytes: &[u8]) -> u64 {
     let mut buf = [0u8; 8];
@@ -55,7 +55,9 @@ fn network_round_trip_tls_auto_server() {
         .with_basic_auth("tester", "secret")
         .with_tls(cert_path.clone(), key_path);
 
-    let config = StoreConfig::new(&data_dir, 2, 32, 1, false).with_remote_server(settings);
+    let config = StoreConfig::new(&data_dir, 2, 32, 1, false)
+        .expect("valid config")
+        .with_remote_server(settings);
     let store = MhinStoreFacade::new(config).unwrap();
     store
         .set(
@@ -103,7 +105,9 @@ fn network_rejects_bad_credentials() {
         .with_basic_auth("user", "valid-pass")
         .with_tls(cert_path.clone(), key_path);
 
-    let config = StoreConfig::new(&data_dir, 2, 16, 1, false).with_remote_server(settings);
+    let config = StoreConfig::new(&data_dir, 2, 16, 1, false)
+        .expect("valid config")
+        .with_remote_server(settings);
     let store = MhinStoreFacade::new(config).unwrap();
     store
         .set(
@@ -142,7 +146,9 @@ fn network_round_trip_without_tls() {
         .with_basic_auth("tester", "secret")
         .without_tls();
 
-    let config = StoreConfig::new(&data_dir, 2, 32, 1, false).with_remote_server(settings);
+    let config = StoreConfig::new(&data_dir, 2, 32, 1, false)
+        .expect("valid config")
+        .with_remote_server(settings);
     let store = MhinStoreFacade::new(config).unwrap();
     store
         .set(
@@ -166,81 +172,46 @@ fn network_round_trip_without_tls() {
 }
 
 #[test]
-fn default_plaintext_server_uses_proto_credentials() {
+fn default_remote_server_settings_require_custom_credentials() {
     let workspace = workspace_tmp();
     let temp = tempfile::tempdir_in(&workspace).unwrap();
     let data_dir = temp.path().join("store");
 
-    let key = [4u8; 8];
     let port = allocate_port();
     let settings = RemoteServerSettings::default()
         .with_bind_address(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
 
-    let config = StoreConfig::new(&data_dir, 2, 16, 1, false).with_remote_server(settings);
-    let store = MhinStoreFacade::new(config).unwrap();
-    store
-        .set(
-            1,
-            vec![Operation {
-                key,
-                value: 77.into(),
-            }],
-        )
-        .unwrap();
+    let config = StoreConfig::new(&data_dir, 2, 16, 1, false)
+        .expect("valid config")
+        .with_remote_server(settings);
 
-    let addr = format!("127.0.0.1:{port}");
-    let client_config = ClientConfig::without_tls(BasicAuthConfig::new("proto", "proto"))
-        .with_timeout(Duration::from_secs(1));
-    let mut client = RemoteStoreClient::connect(&addr, client_config).unwrap();
-    let value = client.get_one(key).unwrap();
-    client.close().unwrap();
-
-    assert_eq!(bytes_to_u64_le(&value), 77);
-
-    let metrics = store.remote_server_metrics().expect("metrics available");
-    assert!(metrics.total_connections >= 1);
-
-    store.close().unwrap();
+    let err = MhinStoreFacade::new(config)
+        .err()
+        .expect("placeholder credentials rejected");
+    assert!(matches!(
+        err,
+        MhinStoreError::RemoteServerCredentialsMissing
+    ));
 }
 
 #[test]
-fn network_round_trip_default_plaintext_config() {
-    // The default configuration binds to 127.0.0.1:9443. If that address is already
-    // occupied (for example when running tests alongside a developer instance),
-    // skip the test instead of flaking.
-    let default_addr = "127.0.0.1:9443";
-    if std::net::TcpListener::bind(default_addr).is_err() {
-        eprintln!("skipping default config test because {default_addr} is in use");
-        return;
-    }
-
+fn enable_remote_server_without_custom_credentials_fails() {
     let workspace = workspace_tmp();
     let temp = tempfile::tempdir_in(&workspace).unwrap();
     let data_dir = temp.path().join("store");
-    let key = [5u8; 8];
 
     let config = StoreConfig::new(&data_dir, 2, 32, 1, false)
+        .expect("valid config")
         .enable_remote_server()
         .expect("default remote server settings exist");
-    let store = MhinStoreFacade::new(config).unwrap();
-    store
-        .set(
-            1,
-            vec![Operation {
-                key,
-                value: 11.into(),
-            }],
-        )
-        .unwrap();
 
-    let client_config = ClientConfig::without_tls(BasicAuthConfig::new("proto", "proto"))
-        .with_timeout(Duration::from_secs(2));
-    let mut client = RemoteStoreClient::connect(default_addr, client_config).unwrap();
-    let value = client.get_one(key).unwrap();
-    client.close().unwrap();
-
-    assert_eq!(bytes_to_u64_le(&value), 11);
-    store.close().unwrap();
+    let err = MhinStoreFacade::new(config)
+        .err()
+        .expect("server should refuse placeholder credentials");
+    assert!(matches!(
+        err,
+        MhinStoreError::RemoteServerCredentialsMissing
+    ));
 }
 
 #[test]
@@ -259,7 +230,7 @@ fn network_server_disabled_by_default() {
     let temp = tempfile::tempdir_in(&workspace).unwrap();
     let data_dir = temp.path().join("store");
 
-    let config = StoreConfig::new(&data_dir, 2, 32, 1, false);
+    let config = StoreConfig::new(&data_dir, 2, 32, 1, false).expect("valid config");
     let store = MhinStoreFacade::new(config).unwrap();
 
     match std::net::TcpListener::bind(default_addr) {

@@ -8,7 +8,6 @@ use heed::{EnvFlags, EnvOpenOptions};
 use rollblock::types::Operation;
 use rollblock::Value;
 use rollblock::{DurabilityMode, MhinStoreFacade, StoreConfig, StoreFacade};
-use std::collections::VecDeque;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -16,18 +15,18 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const DEFAULT_TOTAL_BLOCKS: u64 = 80_000;
+const DEFAULT_TOTAL_BLOCKS: u64 = 50_000;
 const PROGRESS_INTERVAL: u64 = 100;
 const INSERT_PER_BLOCK: usize = 10_000;
 const DELETE_PER_BLOCK: usize = 9_000;
 const NET_KEYS_PER_BLOCK: usize = INSERT_PER_BLOCK - DELETE_PER_BLOCK;
 const TOTAL_OPS_PER_BLOCK: usize = INSERT_PER_BLOCK + DELETE_PER_BLOCK;
 const SHARDS: usize = 16;
-const INITIAL_CAPACITY_PER_SHARD: usize = 6_000_000;
+const INITIAL_CAPACITY_PER_SHARD: usize = 5_250_000;
 const PARALLEL_THREAD_COUNT: usize = 4;
 const LMDB_DATA_DIR: &str = "./data/block_benchmark_lmdb";
 const LMDB_ENTRY_BYTES_ESTIMATE: usize = 128;
-const REFERENCE_SCENARIO_NAME: &str = "Async, multi-threads";
+const REFERENCE_SCENARIO_NAME: &str = "Async relaxed, multi-threads";
 const LMDB_SCENARIO_NAME: &str = "LMDB baseline";
 const BYTES_PER_GIB: f64 = (1u64 << 30) as f64;
 
@@ -79,19 +78,160 @@ fn format_duration(duration: Duration) -> String {
 }
 
 struct Scenario {
-    name: &'static str,
     data_dir: &'static str,
     thread_count: usize,
     durability_mode: DurabilityMode,
 }
 
+enum ScenarioKind {
+    Rollblock(Scenario),
+    Lmdb,
+}
+
+struct ScenarioEntry {
+    name: &'static str,
+    kind: ScenarioKind,
+}
+
+fn build_scenarios() -> Vec<ScenarioEntry> {
+    vec![
+        ScenarioEntry {
+            name: "Async relaxed, multi-threads",
+            kind: ScenarioKind::Rollblock(Scenario {
+                data_dir: "./data/block_benchmark_async_relaxed_parallel",
+                thread_count: PARALLEL_THREAD_COUNT,
+                durability_mode: DurabilityMode::AsyncRelaxed {
+                    max_pending_blocks: 1024,
+                    sync_every_n_blocks: 100,
+                },
+            }),
+        },
+        ScenarioEntry {
+            name: "Async, multi-threads",
+            kind: ScenarioKind::Rollblock(Scenario {
+                data_dir: "./data/block_benchmark_async_parallel",
+                thread_count: PARALLEL_THREAD_COUNT,
+                durability_mode: DurabilityMode::Async {
+                    max_pending_blocks: 1024,
+                },
+            }),
+        },
+        ScenarioEntry {
+            name: "Async, single-threaded",
+            kind: ScenarioKind::Rollblock(Scenario {
+                data_dir: "./data/block_benchmark_async_single",
+                thread_count: 1,
+                durability_mode: DurabilityMode::Async {
+                    max_pending_blocks: 1024,
+                },
+            }),
+        },
+        ScenarioEntry {
+            name: "Synchronous, multi-threads",
+            kind: ScenarioKind::Rollblock(Scenario {
+                data_dir: "./data/block_benchmark_sync_parallel",
+                thread_count: PARALLEL_THREAD_COUNT,
+                durability_mode: DurabilityMode::Synchronous,
+            }),
+        },
+        ScenarioEntry {
+            name: "Synchronous, single-threaded",
+            kind: ScenarioKind::Rollblock(Scenario {
+                data_dir: "./data/block_benchmark_sync_single",
+                thread_count: 1,
+                durability_mode: DurabilityMode::Synchronous,
+            }),
+        },
+        ScenarioEntry {
+            name: LMDB_SCENARIO_NAME,
+            kind: ScenarioKind::Lmdb,
+        },
+    ]
+}
+
+fn print_scenario_menu(scenarios: &[ScenarioEntry]) {
+    println!("🚀 Block throughput benchmark\n");
+    println!("Available scenarios:");
+    for (idx, entry) in scenarios.iter().enumerate() {
+        let marker = if entry.name == REFERENCE_SCENARIO_NAME {
+            " (reference)"
+        } else {
+            ""
+        };
+        println!("   {}. {}{}", idx + 1, entry.name, marker);
+    }
+    println!();
+    println!(
+        "Usage: cargo run --release --example block_benchmark -- <scenario_number> [total_blocks]"
+    );
+    println!();
+    println!("Enter scenario number (1-{}): ", scenarios.len());
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let total_blocks = parse_total_blocks()?;
+    let scenarios = build_scenarios();
+    let args: Vec<String> = env::args().collect();
+
+    let scenario_index = match args.get(1) {
+        Some(arg) => {
+            let index: usize = arg.parse().map_err(|_| {
+                format!(
+                    "Invalid scenario number `{}` (expected 1-{})",
+                    arg,
+                    scenarios.len()
+                )
+            })?;
+            if index == 0 || index > scenarios.len() {
+                return Err(
+                    format!("Scenario number must be between 1 and {}", scenarios.len()).into(),
+                );
+            }
+            index - 1
+        }
+        None => {
+            print_scenario_menu(&scenarios);
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let index: usize = input.trim().parse().map_err(|_| {
+                format!(
+                    "Invalid input `{}` (expected 1-{})",
+                    input.trim(),
+                    scenarios.len()
+                )
+            })?;
+            if index == 0 || index > scenarios.len() {
+                return Err(
+                    format!("Scenario number must be between 1 and {}", scenarios.len()).into(),
+                );
+            }
+            index - 1
+        }
+    };
+
+    let total_blocks = match args.get(2) {
+        Some(arg) => {
+            let value: u64 = arg.parse().map_err(|_| {
+                format!(
+                    "Invalid total block count `{}` (expected positive integer)",
+                    arg
+                )
+            })?;
+            if value == 0 {
+                return Err("Total blocks must be greater than zero".into());
+            }
+            value
+        }
+        None => DEFAULT_TOTAL_BLOCKS,
+    };
+
+    let selected = &scenarios[scenario_index];
     let expected_final_keys = expected_final_keys(total_blocks);
     let total_expected_ops = (total_blocks as usize).saturating_mul(TOTAL_OPS_PER_BLOCK);
     let lmdb_map_size_bytes = lmdb_map_size_bytes(total_blocks);
 
-    println!("🚀 Block throughput benchmark\n");
+    println!("\n🚀 Block throughput benchmark\n");
     println!("Constants:");
     println!(
         "   • DEFAULT_TOTAL_BLOCKS: {}",
@@ -135,112 +275,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Expected total operations: {}\n",
         format_with_separator(total_expected_ops as u128)
     );
-    println!(
-        "LMDB map size: {:.2} GiB ({} bytes)\n",
-        (lmdb_map_size_bytes as f64) / BYTES_PER_GIB,
-        format_with_separator(lmdb_map_size_bytes as u128)
-    );
 
-    let scenarios = vec![
-        Scenario {
-            name: "Async relaxed, multi-threads",
-            data_dir: "./data/block_benchmark_async_relaxed_parallel",
-            thread_count: PARALLEL_THREAD_COUNT,
-            durability_mode: DurabilityMode::AsyncRelaxed {
-                max_pending_blocks: 1024,
-                sync_every_n_blocks: 100,
-            },
-        },
-        Scenario {
-            name: REFERENCE_SCENARIO_NAME,
-            data_dir: "./data/block_benchmark_async_parallel",
-            thread_count: PARALLEL_THREAD_COUNT,
-            durability_mode: DurabilityMode::Async {
-                max_pending_blocks: 1024,
-            },
-        },
-        Scenario {
-            name: "Async, single-threaded",
-            data_dir: "./data/block_benchmark_async_single",
-            thread_count: 1,
-            durability_mode: DurabilityMode::Async {
-                max_pending_blocks: 1024,
-            },
-        },
-        Scenario {
-            name: "Synchronous, multi-threads",
-            data_dir: "./data/block_benchmark_sync_parallel",
-            thread_count: PARALLEL_THREAD_COUNT,
-            durability_mode: DurabilityMode::Synchronous,
-        },
-        Scenario {
-            name: "Synchronous, single-threaded",
-            data_dir: "./data/block_benchmark_sync_single",
-            thread_count: 1,
-            durability_mode: DurabilityMode::Synchronous,
-        },
-    ];
-
-    let mut summary: Vec<(&'static str, Duration, f64, f64)> =
-        Vec::with_capacity(scenarios.len() + 1);
-
-    for scenario in &scenarios {
-        println!("== {} ==", scenario.name);
-        let duration = run_scenario(scenario, total_blocks)?;
-        let seconds = duration.as_secs_f64();
-        let blocks_per_second = total_blocks as f64 / seconds;
-        let ops_per_second = blocks_per_second * (TOTAL_OPS_PER_BLOCK as f64);
-        println!("   • Duration: {}", format_duration(duration));
-        println!("   • Throughput: {:.1} blocks/s", blocks_per_second);
-        println!();
-        summary.push((scenario.name, duration, blocks_per_second, ops_per_second));
-    }
-
-    println!("== {} ==", LMDB_SCENARIO_NAME);
-    let lmdb_duration = run_lmdb_benchmark(total_blocks, lmdb_map_size_bytes)?;
-    let lmdb_seconds = lmdb_duration.as_secs_f64();
-    let lmdb_blocks_per_second = total_blocks as f64 / lmdb_seconds;
-    let lmdb_ops_per_second = lmdb_blocks_per_second * (TOTAL_OPS_PER_BLOCK as f64);
-    println!("   • Duration: {}", format_duration(lmdb_duration));
-    println!("   • Throughput: {:.1} blocks/s", lmdb_blocks_per_second);
-    println!();
-    summary.push((
-        LMDB_SCENARIO_NAME,
-        lmdb_duration,
-        lmdb_blocks_per_second,
-        lmdb_ops_per_second,
-    ));
-
-    println!(
-        "Summary (lower is better, reference = {}):",
-        REFERENCE_SCENARIO_NAME
-    );
-    let reference_seconds = summary
-        .iter()
-        .find(|(name, _, _, _)| *name == REFERENCE_SCENARIO_NAME)
-        .map(|(_, duration, _, _)| duration.as_secs_f64())
-        .expect("reference scenario missing from summary");
-    for (name, duration, blocks_per_second, ops_per_second) in &summary {
-        let seconds = duration.as_secs_f64();
-        let relative_ratio = seconds / reference_seconds;
-        let comparison = if *name == REFERENCE_SCENARIO_NAME {
-            "reference".to_string()
-        } else if (relative_ratio - 1.0).abs() < 0.02 {
-            "same speed".to_string()
-        } else if relative_ratio > 1.0 {
-            format!("{:.1}x slower", relative_ratio)
-        } else {
-            format!("{:.1}x faster", 1.0 / relative_ratio)
-        };
+    if matches!(selected.kind, ScenarioKind::Lmdb) {
         println!(
-            " - {:<32} {:>12} total | {:>7.1} blocks/s | {:>9.0} ops/s | {:>12}",
-            name,
-            format_duration(*duration),
-            blocks_per_second,
-            ops_per_second,
-            comparison
+            "LMDB map size: {:.2} GiB ({} bytes)\n",
+            (lmdb_map_size_bytes as f64) / BYTES_PER_GIB,
+            format_with_separator(lmdb_map_size_bytes as u128)
         );
     }
+
+    println!("== {} ==", selected.name);
+
+    let duration = match &selected.kind {
+        ScenarioKind::Rollblock(scenario) => run_scenario(scenario, total_blocks)?,
+        ScenarioKind::Lmdb => run_lmdb_benchmark(total_blocks, lmdb_map_size_bytes)?,
+    };
+
+    let seconds = duration.as_secs_f64();
+    let blocks_per_second = total_blocks as f64 / seconds;
+    let ops_per_second = blocks_per_second * (TOTAL_OPS_PER_BLOCK as f64);
+
+    println!("   • Duration: {}", format_duration(duration));
+    println!("   • Throughput: {:.1} blocks/s", blocks_per_second);
+    println!("   • Throughput: {:.0} ops/s", ops_per_second);
     println!();
 
     Ok(())
@@ -255,14 +312,14 @@ fn run_scenario(scenario: &Scenario, total_blocks: u64) -> Result<Duration, Box<
         INITIAL_CAPACITY_PER_SHARD,
         scenario.thread_count,
         false,
-    )
+    )?
     .without_remote_server();
     config = config.with_durability_mode(scenario.durability_mode.clone());
 
     let store = MhinStoreFacade::new(config)?;
 
-    let mut live_keys: VecDeque<[u8; 8]> = VecDeque::new();
     let mut next_key: u64 = 0;
+    let mut delete_cursor: u64 = 0;
 
     let start = Instant::now();
 
@@ -275,14 +332,16 @@ fn run_scenario(scenario: &Scenario, total_blocks: u64) -> Result<Duration, Box<
                 key,
                 value: next_key.into(),
             });
-            live_keys.push_back(key);
             next_key += 1;
         }
 
         for _ in 0..DELETE_PER_BLOCK {
-            let key = live_keys
-                .pop_front()
-                .expect("live key pool should always have enough entries");
+            debug_assert!(
+                delete_cursor < next_key,
+                "attempted to delete more keys than inserted"
+            );
+            let key = delete_cursor.to_le_bytes();
+            delete_cursor += 1;
             operations.push(Operation {
                 key,
                 value: Value::empty(),
@@ -307,7 +366,8 @@ fn run_scenario(scenario: &Scenario, total_blocks: u64) -> Result<Duration, Box<
     store.close()?;
 
     let duration = start.elapsed();
-    debug_assert_eq!(live_keys.len(), expected_final_keys(total_blocks));
+    let remaining = next_key - delete_cursor;
+    debug_assert_eq!(remaining as usize, expected_final_keys(total_blocks));
 
     Ok(duration)
 }
@@ -333,8 +393,8 @@ fn run_lmdb_benchmark(
     let db = env.create_database::<Bytes, Bytes>(&mut init_txn, Some("kv"))?;
     init_txn.commit()?;
 
-    let mut live_keys: VecDeque<[u8; 8]> = VecDeque::new();
     let mut next_key: u64 = 0;
+    let mut delete_cursor: u64 = 0;
 
     let start = Instant::now();
 
@@ -345,14 +405,16 @@ fn run_lmdb_benchmark(
             let key = next_key.to_le_bytes();
             let value = next_key.to_le_bytes();
             db.put(&mut txn, &key, &value)?;
-            live_keys.push_back(key);
             next_key += 1;
         }
 
         for _ in 0..DELETE_PER_BLOCK {
-            let key = live_keys
-                .pop_front()
-                .expect("live key pool should always have enough entries");
+            debug_assert!(
+                delete_cursor < next_key,
+                "attempted to delete more keys than inserted"
+            );
+            let key = delete_cursor.to_le_bytes();
+            delete_cursor += 1;
             db.delete(&mut txn, &key)?;
         }
 
@@ -371,7 +433,8 @@ fn run_lmdb_benchmark(
     println!();
 
     let duration = start.elapsed();
-    debug_assert_eq!(live_keys.len(), expected_final_keys(total_blocks));
+    let remaining = next_key - delete_cursor;
+    debug_assert_eq!(remaining as usize, expected_final_keys(total_blocks));
 
     Ok(duration)
 }
@@ -389,25 +452,6 @@ fn clean_data_dir(path: &str) -> Result<(), Box<dyn Error>> {
         fs::remove_dir_all(path)?;
     }
     Ok(())
-}
-
-fn parse_total_blocks() -> Result<u64, Box<dyn Error>> {
-    match env::args().nth(1) {
-        Some(arg) => {
-            let value: u64 = arg.parse().map_err(|_| {
-                format!(
-                    "Invalid total block count `{}` (expected positive integer)",
-                    arg
-                )
-            })?;
-            if value == 0 {
-                Err("Total blocks must be greater than zero".into())
-            } else {
-                Ok(value)
-            }
-        }
-        None => Ok(DEFAULT_TOTAL_BLOCKS),
-    }
 }
 
 fn expected_final_keys(total_blocks: u64) -> usize {

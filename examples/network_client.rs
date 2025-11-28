@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_basic_auth("demo-user", "demo-pass")
         .with_tls(cert_path.clone(), key_path);
 
-    let config = StoreConfig::new(&data_dir, 2, 32, 1, false).with_remote_server(settings);
+    let config = StoreConfig::new(&data_dir, 2, 32, 1, false)?.with_remote_server(settings);
     let store = MhinStoreFacade::new(config)?;
     store.set(
         1,

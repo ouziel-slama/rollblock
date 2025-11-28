@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1000,  // initial capacity
         1,     // single thread
         false, // disable compression for metrics demo
-    )
+    )?
     .without_remote_server();
 
     let store = MhinStoreFacade::new(config)?;

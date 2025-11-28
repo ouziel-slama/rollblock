@@ -2,9 +2,9 @@
 name = "rollblock"
 version = "0.2.0"
 edition = "2021"
-authors = ["Rollblock Contributors"]
+authors = ["Ouziel Slama"]
 license = "MIT OR Apache-2.0"
-description = "A high-performance, reliable state storage system with rollback support, optimized for blockchain applications"
+description = "A super-fast, block-oriented and rollbackable key-value store."
 repository = "https://github.com/ouziel-slama/rollblock"
 keywords = ["blockchain", "storage", "rollback", "state", "database"]
 categories = ["database", "data-structures"]

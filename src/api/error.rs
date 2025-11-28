@@ -100,6 +100,18 @@ pub enum MhinStoreError {
     #[error("remote server configuration missing; call `with_remote_server` before enabling")]
     RemoteServerConfigMissing,
 
+    #[error(
+        "remote server requires explicit Basic Auth credentials; override `RemoteServerSettings::with_basic_auth` (or `with_auth_config`) before enabling"
+    )]
+    RemoteServerCredentialsMissing,
+
+    #[error("invalid configuration: {field} must be at least {min}, got {value}")]
+    InvalidConfiguration {
+        field: &'static str,
+        min: usize,
+        value: usize,
+    },
+
     #[error("data directory locked at {path:?} (requested: {requested})")]
     DataDirLocked {
         path: PathBuf,

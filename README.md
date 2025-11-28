@@ -1,390 +1,216 @@
 # Rollblock
 
-[![Crates.io](https://img.shields.io/crates/v/rollblock.svg)](https://crates.io/crates/rollblock)
-[![Docs.rs](https://docs.rs/rollblock/badge.svg)](https://docs.rs/rollblock)
-[![Tests](https://github.com/ouziel-slama/rollblock/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/ouziel-slama/rollblock/actions/workflows/test.yml)
-[![Coverage](https://codecov.io/gh/ouziel-slama/rollblock/branch/main/graph/badge.svg)](https://codecov.io/gh/ouziel-slama/rollblock)
-[![Clippy](https://github.com/ouziel-slama/rollblock/actions/workflows/clippy.yml/badge.svg?branch=main)](https://github.com/ouziel-slama/rollblock/actions/workflows/clippy.yml)
-[![Rustfmt](https://github.com/ouziel-slama/rollblock/actions/workflows/fmt.yml/badge.svg?branch=main)](https://github.com/ouziel-slama/rollblock/actions/workflows/fmt.yml)
+**A super-fast, block-oriented and rollbackable key-value store.**
 
-A super-fast, rollbackable block-oriented key-value store.
+---
 
-## Features
+⚡ **Super Fast** — The entire dataset lives in RAM. Under the hood, [hashbrown](https://github.com/rust-lang/hashbrown)'s `RawTable` delivers O(1) reads and writes with minimal overhead. On an Apple M4, Rollblock sustains ~1.4M ops/sec—35× faster than LMDB.
 
-- Nearly as fast as a hashbrown HashMap in RAM and purpose-built for blockchain-style workloads.
-- Block-scoped, atomic updates keyed by monotonically increasing `BlockId`s.
-- zstd-compressed undo journal entries protected by Blake3 checksums.
-- Bounded journal chunks (128 MiB by default) that rotate monotonically, keeping on-disk files manageable.
-- Memory-mapped snapshots with checksum validation for fast restarts.
-- Configurable sharding with optional Rayon-based parallel execution.
-- Empty-value-as-delete semantics and a block-staging facade for complex workflows.
-- Built-in metrics, health reporting, and structured tracing hooks.
-- Authenticated remote server (TLS optional) and a zero-allocation Rust client for remote queries.
+📦 **Block-Oriented** — Every mutation belongs to a block identified by a `BlockId`. When you commit, all operations succeed together or fail together. No partial state, no corruption—like SQL transactions, but designed for sequential workflows.
 
-## Benchmark Snapshot (Nov 2025)
+⏪ **Rollbackable** — An undo journal on disk lets you rewind to any previous state with a single call. Whether you roll back one block or a thousand, the store returns to that exact point in time: `store.rollback(height)?`
 
-Benchmark: ~1.52B operations replayed via `block_benchmark` on an Apple M4 Mac (24 GB RAM).
+Built for blockchain nodes, event sourcing, game state, and any system that needs atomic commits with time-travel capabilities.
 
-- `Async, multi-threads` (reference): ≈1.40M ops/s.
-- `Async, single-threaded`: ≈1.27M ops/s (1.1x slower than reference).
-- `Synchronous, multi-threads`: ≈0.80M ops/s (1.7x slower).
-- `Synchronous, single-threaded`: ≈0.82M ops/s (1.7x slower).
-- `LMDB baseline`: ≈0.04M ops/s (35x slower).
+---
 
-See `docs/block_benchmark.md` for the complete methodology, hardware specs, and additional notes.
+## Documentation
 
-## Data Model
+- **[Architecture](docs/architecture.md)** — Internal design, data flow, and component overview
+- **[Configuration](docs/configuration.md)** — All settings, durability modes, and tuning options
+- **[Examples](docs/examples.md)** — Annotated code samples for common use cases
+- **[Observability](docs/observability.md)** — Metrics, health checks, and monitoring integration
+- **[Benchmark](docs/benchmark.md)** — Performance methodology and results
 
-- `Key = [u8; 8]`: fixed-size keys (hash higher-level identifiers if needed).
-- `Value = Vec<u8>`: payloads up to 65,535 bytes per key (an empty vector marks a delete).
-- `Operation` batches carry `key` and `value`; `value.is_delete()` removes a key.
-- `BlockId = u64`: block heights must strictly increase; each block is applied atomically.
+---
 
-## Installation
+## Quick Examples
 
-Pull it directly from crates.io (or add via `cargo add rollblock`):
-
-```toml
-[dependencies]
-rollblock = "0.2"
-```
-
-## Quick Start
+### Server: Read & Write Operations
 
 ```rust
-use rollblock::{MhinStoreFacade, StoreConfig, StoreResult};
+use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
 use rollblock::types::{Operation, Value};
 
-fn main() -> StoreResult<()> {
-    let config = StoreConfig::new("./data/basic", 4, 1000, 1, false);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create a new store
+    let config = StoreConfig::new(
+        "./data/mystore",  // Data directory
+        4,                 // Number of shards
+        10_000,            // Initial capacity per shard
+        1,                 // Thread count (1 = sequential)
+        false,             // Journal compression
+    )?;
     let store = MhinStoreFacade::new(config)?;
 
-    let key = [1u8, 0, 0, 0, 0, 0, 0, 0];
-    store.set(
-        1,
-        vec![Operation {
-            key,
-            value: Value::from_slice(b"balance=100"),
-        }],
-    )?;
+    // Write a block with multiple operations
+    let key_alice = [0x01, 0, 0, 0, 0, 0, 0, 0];
+    let key_bob   = [0x02, 0, 0, 0, 0, 0, 0, 0];
 
-    let value = store.get(key)?;
-    if value.is_delete() {
-        println!("Key not found");
-    } else {
-        println!("Value bytes: {:?}", value.as_slice());
-    }
+    store.set(1, vec![
+        Operation { key: key_alice, value: Value::from_slice(b"balance:1000") },
+        Operation { key: key_bob,   value: Value::from_slice(b"balance:500") },
+    ])?;
 
-    // Prefer multi_get when requesting more than one key.
-    let batch = store.multi_get(&[key, [2u8; 8]])?;
-    println!(
-        "Batch read lengths: {:?}",
-        batch.iter().map(Value::len).collect::<Vec<_>>()
-    );
+    // Read values back
+    let alice_balance = store.get(key_alice)?;
+    println!("Alice: {}", String::from_utf8_lossy(alice_balance.as_slice()));
 
-    store.rollback(0)?;
+    // Update in a new block
+    store.set(2, vec![
+        Operation { key: key_alice, value: Value::from_slice(b"balance:900") },
+        Operation { key: key_bob,   value: Value::from_slice(b"balance:600") },
+    ])?;
+
+    // Oops! Roll back to block 1
+    store.rollback(1)?;
+
+    // Alice's balance is restored
+    let restored = store.get(key_alice)?;
+    assert_eq!(restored.as_slice(), b"balance:1000");
+
     store.close()?;
     Ok(())
 }
 ```
 
-`multi_get` shares the same empty-value semantics as `get` but amortizes lock
-contention and remote round-trips. Prefer it whenever you have more than one key.
+### Client: Remote Reads via Socket
 
-⚠️ Remote access is opt-in. Call `.enable_remote_server()` (or
-`.with_remote_server(...)`) before building the store if you want the embedded
-server. It binds to `127.0.0.1:9443` with plaintext `proto`/`proto` credentials
-unless you override the `RemoteServerSettings`.
-
-## Block-Staged Workflow
-
-Use `MhinStoreBlockFacade` to stage operations while exposing intermediate reads:
-
-```rust
-use rollblock::{MhinStoreBlockFacade, StoreConfig, StoreResult};
-use rollblock::types::{Operation, Value};
-
-fn staged_block() -> StoreResult<()> {
-    let facade = MhinStoreBlockFacade::new(StoreConfig::new("./data/staged", 4, 1000, 1, false))?;
-
-    facade.start_block(42)?;
-    facade.set(Operation {
-        key: [9u8; 8],
-        value: Value::from_slice(b"staged"),
-    })?;
-    let read = facade.get([9u8; 8])?;
-    assert_eq!(read.as_slice(), b"staged");
-    let batch = facade.multi_get(&[[9u8; 8], [1u8; 8]])?;
-    assert_eq!(batch[0].as_slice(), b"staged");
-    assert!(batch[1].is_delete());
-    facade.end_block()?;
-    Ok(())
-}
-```
-
-> **Failure mode:** Any error returned by `end_block` is treated as a fatal
-> durability failure. The staged block is dropped, the underlying facade is
-> marked unhealthy, and every subsequent call fails until you reopen the store.
-> **That includes application-level `pre_process` / `process` hooks: if they
-> bubble up an error, the store is deliberately bricked. Make sure they only
-> fail when stopping the store is the correct outcome.**
-
-`MhinStoreBlockFacade::multi_get` mirrors the base facade, but merges staged
-operations before falling back to the committed state.
-
-## Configuration
-
-
-- `data_dir`: base directory containing `metadata/`, `journal/`, and `snapshots/`.
-- `shards`: number of in-memory shards (4–16 is a good starting point).
-- `initial_capacity`: initial per-shard capacity; growth is automatic afterward.
-- `thread_count`: `1` for sequential execution, `>1` to enable Rayon-backed parallelism.
-- `use_compression`: enable zstd compression for the journal (default `false`).
-- `journal_chunk_size_bytes`: maximum size of each journal chunk before rotation. Defaults to `128 << 20` (128 MiB) and can be changed via `StoreConfig::with_journal_chunk_size(bytes)`.
-- `enable_server`: opt-in flag that starts the embedded remote server (default `false`).
-  `.with_remote_server(...)` flips this on automatically.
-- `remote_server`: optional `RemoteServerSettings` describing the embedded server
-  (defaults to `127.0.0.1:9443`, plaintext, `proto`/`proto` credentials) and only
-  take effect when `enable_server` is `true`.
-
-The `journal/` directory contains chunk files named `journal.XXXXXXXX.bin`. Chunks
-rotate monotonically and are fsynced together with their parent directory when
-created, keeping recoveries bounded without requiring a single ever-growing file.
-Because filenames are fixed to eight digits, chunk IDs top out at `99_999_999`
-(~12.8 PB of persisted data with 128 MiB chunks). Operators who expect to exceed
-that upper bound should plan to recycle or archive old stores before hitting the
-limit.
-
-### Advanced Configuration
-
-For high-throughput blockchains, you can customize the LMDB metadata size:
-
-```rust
-let config = StoreConfig::new("./data", 4, 1000, 1, false)
-    .with_lmdb_map_size(10 << 30); // 10GB for high-frequency chains
-```
-
-**Default**: 2GB (sufficient for Bitcoin mainnet and all testnets)
-**Recommended for Ethereum/Polygon**: 10GB
-**High-frequency chains**: 20GB+
-
-#### Journal Chunk Size
-
-Each journal chunk defaults to 128 MiB. Increase the limit if you want fewer,
-larger files or shrink it to make corruption checks quicker in environments with
-slow storage:
-
-```rust
-let config = StoreConfig::new("./data", 4, 1000, 1, false)
-    .with_journal_chunk_size(64 << 20); // 64 MiB chunks
-```
-
-Chunks are numbered monotonically (`journal.00000001.bin`, `journal.00000002.bin`, …).
-Rotation happens atomically: the current chunk is fsynced, the new file is created
-with `create_new`, and the directory entry is flushed before appends continue.
-
-### Remote Server Settings
-
-```rust
-use rollblock::RemoteServerSettings;
-
-let tls_config = RemoteServerSettings::default()
-    .with_bind_address("0.0.0.0:9443".parse()?)
-    .with_basic_auth("replica", "super-secret")
-    .with_tls("/etc/rollblock/server.crt", "/etc/rollblock/server.key")
-    .with_worker_threads(4);
-
-let config = StoreConfig::new("./data", 4, 1000, 1, false)
-    .with_remote_server(tls_config);
-
-// Use default settings but still expose the server
-let default_server = StoreConfig::new("./data", 4, 1000, 1, false).enable_remote_server()?;
-
-// Remove settings entirely for tests
-let headless = StoreConfig::new("./data", 4, 1000, 1, false).without_remote_server();
-```
-
-If you do not supply certificate/key paths, the server listens over plaintext.
-Whenever TLS paths are set, HTTPS is enforced automatically.
-
-`with_worker_threads(N)` controls how many Tokio worker threads the embedded
-server dedicates to TLS handshakes, accept loops, and connection tasks. The
-default matches `std::thread::available_parallelism()` (minimum `1`), so the
-server scales with the host's CPU count but can be tuned lower for constrained
-environments or higher when the remote server is the primary workload.
-
-> ⚠️ **Security warning:** calling `.enable_remote_server()` without overriding
-> `RemoteServerSettings` starts a plaintext server on `127.0.0.1:9443` with the
-> default `proto` / `proto` credentials. Always change the credentials and turn
-> on TLS before exposing it outside local development.
-
-### Deployment Notes
-
-- Only **one** process can open a data directory at a time. `rollblock.lock` is now enforced as an exclusive file lock—spawn additional read replicas through the remote server instead of opening the directory again.
-- Remote consumers should use the remote server + client described below so that the primary writer maintains authoritative metadata. TLS is recommended on any untrusted network; plaintext mode should be limited to trusted, internal deployments.
-
-## Remote Server & Client
-
-### Binary Protocol
-
-- Requests start with a single `u8` header containing the number of keys (`1‥=255`).
-- Payload = `N × 8` bytes (`[Key; N]`): keys are raw `[u8; 8]`. Bytes are not interpreted—hash or encode upstream IDs into 8 bytes.
-- Responses stream `N` records of `[len(u16)][value bytes]`. `len` is the number of bytes for that key (`0` means “missing”) and cannot exceed 65,535. The entire response must fit in `N × (2 + len)` bytes, so clients must read per-record.
-- Error handling: the server replies with a single byte code and immediately closes the connection. Current codes are `1 = invalid header`, `2 = invalid payload`, `3 = store failure`, `4 = unauthorized`, `5 = timeout`.
-
-> **Example:** sending `0x02` as the header means “two keys are about to follow”. Exactly `2 × 8 = 16` payload bytes must be transmitted before the server can respond.
-
-### Security & Basic Authentication
-
-- Certificates/keys are standard PEM. Feed their paths into `RemoteServerSettings::with_tls` (see below), or export them via environment variables and construct the settings from those values.
-
-```
-ROLLBLOCK_REMOTE_CERT=/etc/rollblock/server.crt
-ROLLBLOCK_REMOTE_KEY=/etc/rollblock/server.key
-ROLLBLOCK_REMOTE_USER=replica
-ROLLBLOCK_REMOTE_PASSWORD=super-secret
-```
-
-- Basic Auth uses the canonical `Authorization: Basic base64("user:password")` header. The server validates the first ASCII line (after the optional TLS handshake) before it accepts binary requests and replies with a single `0x00` “ready” byte. Any other byte at this stage is an error code and the connection is closed immediately.
-- TLS can be disabled by leaving `RemoteServerSettings::tls` unset (the default). Plaintext mode should be confined to trusted networks.
-
-### Embedded Server (Opt-In)
-
-```rust
-use rollblock::{MhinStoreFacade, RemoteServerSettings, StoreConfig};
-
-let server_settings = RemoteServerSettings::default()
-    .with_bind_address("0.0.0.0:9443".parse()?)
-    .with_basic_auth("replica", "super-secret")
-    .with_tls("/etc/rollblock/server.crt", "/etc/rollblock/server.key");
-
-let config = StoreConfig::existing("./data")
-    .with_remote_server(server_settings);
-let store = MhinStoreFacade::new(config)?;
-```
-
-Once `enable_server` is `true` (either via `.enable_remote_server()` or
-`.with_remote_server(...)`), `MhinStoreFacade::new` spins up a dedicated Tokio
-runtime, starts the listener, and shuts it down from `close()`/`Drop`. Call
-`store.remote_server_metrics()` to grab `ServerMetricsSnapshot` on demand. Leave
-the flag off (the default) or call `.without_remote_server()` for networking-free
-unit tests.
-
-### Rust Client
+Rollblock includes an embedded TCP server for read-only remote access. The client is zero-allocation and speaks a compact binary protocol.
 
 ```rust
 use std::time::Duration;
 use rollblock::client::{ClientConfig, RemoteStoreClient};
 use rollblock::net::BasicAuthConfig;
 
-let auth = BasicAuthConfig::new("replica", "super-secret");
-let config = ClientConfig::new("my-server.local", "./tls/root-ca.pem", auth)
-    .with_timeout(Duration::from_secs(2));
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Connect to a running Rollblock server
+    let auth = BasicAuthConfig::new("reader", "secret-token");
+    let config = ClientConfig::without_tls(auth)
+        .with_timeout(Duration::from_secs(2));
 
-let mut client = RemoteStoreClient::connect("my-server.local:9443", config)?;
-let balance = client.get_one([0u8; 8])?;
-if balance.is_empty() {
-    println!("Balance not set");
-} else {
-    let mut buf = [0u8; 8];
-    buf[..balance.len()].copy_from_slice(&balance);
-    println!("Balance = {}", u64::from_le_bytes(buf));
-}
-let batch = client.get(&[[0u8; 8], [1u8; 8]])?;
-for (idx, value) in batch.iter().enumerate() {
-    println!("Key #{idx} returned {} bytes", value.len());
-}
-client.close()?;
-```
+    let mut client = RemoteStoreClient::connect("127.0.0.1:9443", config)?;
 
-```rust
-// Plaintext example for trusted networks only
-let auth = BasicAuthConfig::new("proto", "proto"); // matches the defaults
-let config = ClientConfig::without_tls(auth).with_timeout(Duration::from_secs(2));
-let mut client = RemoteStoreClient::connect("127.0.0.1:9444", config)?;
-let value = client.get_one([0u8; 8])?;
-if value.is_empty() {
-    println!("Key missing");
-} else {
-    println!("Value len = {}", value.len());
+    // Fetch a single key
+    let key = [0x01, 0, 0, 0, 0, 0, 0, 0];
+    let value = client.get_one(key)?;
+
+    if value.is_empty() {
+        println!("Key not found");
+    } else {
+        println!("Value: {} bytes", value.len());
+    }
+
+    // Batch fetch multiple keys
+    let keys = [[0x01; 8], [0x02; 8], [0x03; 8]];
+    let values = client.get(&keys)?;
+
+    for (i, v) in values.iter().enumerate() {
+        println!("Key {}: {} bytes", i, v.len());
+    }
+
+    client.close()?;
+    Ok(())
 }
 ```
 
-The client automatically reuses request/response buffers, performs Basic Auth, and enforces an optional read/write timeout via `set_{read,write}_timeout`.
-Both `get` and `get_one` return raw `Vec<u8>` payloads where an empty vector represents a missing key.
-
-### Manual Control (Optional)
-
-If you prefer to manage the runtime yourself, the lower-level `RemoteStoreServer`
-API remains available:
+To enable the server on the writer side:
 
 ```rust
-use rollblock::net::{BasicAuthConfig, RemoteServerConfig, RemoteServerSecurity, RemoteStoreServer};
+use rollblock::RemoteServerSettings;
 
-let server = RemoteStoreServer::new(store.clone(), RemoteServerConfig {
-    bind_address: "0.0.0.0:9443".parse()?,
-    security: RemoteServerSecurity::Plain,
-    auth: BasicAuthConfig::new("replica", "pass"),
-    max_connections: 256,
-    request_timeout: Duration::from_secs(2),
-    client_idle_timeout: Duration::from_secs(10),
-})?;
-tokio::spawn(async move {
-    server.run_until_shutdown(tokio::signal::ctrl_c()).await.unwrap();
+let settings = RemoteServerSettings::default()
+    .with_bind_address("0.0.0.0:9443".parse()?)
+    .with_basic_auth("reader", "secret-token");
+
+let config = StoreConfig::new("./data", 4, 10_000, 1, false)?
+    .with_remote_server(settings);
+```
+
+---
+
+## Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `data_dir` | — | Base directory for metadata, journal, and snapshots |
+| `shards` | — | Number of in-memory shards (4–16 recommended) |
+| `thread_count` | `1` | Set to `>1` to enable parallel execution via Rayon |
+| `compress_journal` | `false` | Enable zstd compression for the undo journal |
+| `min_rollback_window` | `100` | Minimum number of blocks retained for rollback |
+| `lmdb_map_size` | 2 GB | LMDB metadata size (increase for high-frequency chains) |
+
+### Durability Modes
+
+```rust
+use rollblock::orchestrator::DurabilityMode;
+
+// Async (default): fast, acknowledges before fsync
+let config = config.with_durability_mode(DurabilityMode::Async {
+    max_pending_blocks: 1024
 });
+
+// Synchronous: fsync after every block (slower but safer)
+let config = config.with_durability_mode(DurabilityMode::Synchronous);
 ```
 
-## API Surface
+---
 
-- `MhinStoreFacade`: thread-safe facade for committing blocks (`set`, `rollback`, `get`, `metrics`, `health`, `current_block`, `close`).
-- `MhinStoreBlockFacade`: staging facade exposing `start_block`, `set`, `end_block`, staged reads, and rollback.
-- `StoreFacade`: trait implemented by both facades for dependency injection and testing.
-- `MhinStoreError` / `StoreResult`: error handling primitives returned by all fallible operations.
-- Embedded remote server controls via `RemoteServerSettings`, plus `RemoteStoreServer` / `RemoteServerConfig` for advanced manual hosting.
-- `RemoteStoreClient` / `ClientConfig`: blocking client that speaks the binary protocol with automatic Basic Auth and optional TLS validation.
+## Data Model
 
-## Persistence Pipeline
+| Type | Definition | Notes |
+|------|------------|-------|
+| `Key` | `[u8; 8]` | Fixed 8-byte identifier. Hash your keys upstream if needed. |
+| `Value` | `Vec<u8>` | Up to 65,535 bytes. An empty value represents a deletion. |
+| `BlockId` | `u64` | Block height. Must be strictly increasing. |
+| `Operation` | `{ key, value }` | A single mutation within a block. |
 
-- Undo journal entries are compressed with zstd and verified with Blake3 checksums.
-- Snapshots are memory-mapped binary images with embedded Blake3 checksum validation.
-- Startup flow: load latest snapshot (if any), replay remaining journal entries, resume at last committed block.
-- `close()` triggers a fresh snapshot so the next start avoids journal replay.
+Keys are sharded using their raw bytes interpreted as little-endian `u64`: `shard = key_as_u64 % shard_count`. Design your key space accordingly for even distribution.
 
-## Observability
+---
 
-- `store.metrics()` (always `Some` for the default orchestrator) exposes `StoreMetrics::snapshot()` with counters, averages, and P50/P95/P99 latencies.
-- `store.health()` provides `HealthStatus` with `HealthState::{Healthy, Idle, Degraded, Unhealthy}` for alerting.
-- `store.remote_server_metrics()` returns `ServerMetricsSnapshot` whenever the embedded server is enabled, so you can scrape remote connection stats without wiring a custom handle.
-- Enable structured tracing with `RUST_LOG=rollblock=debug` to see block application, rollback, and snapshot events.
+## Limitations
 
-## Migration Guide
+Rollblock makes deliberate trade-offs. Know them before you commit:
 
-- `StoreMode::ReadOnly` and the shared-lock path have been removed. All deployments must either (a) run a full writer instance or (b) proxy reads through the remote server (TLS recommended) and the new `RemoteStoreClient`.
-- The filesystem lock (`rollblock.lock`) is always exclusive. Clone `MhinStoreFacade` handles inside the same process if you need multiple threads, but never start a second process against the same directory.
-- Replace embedded read-only workers with the networking stack: run the primary writer locally, expose it via `RemoteStoreServer`, and point remote processes to it with `RemoteStoreClient`.
+| Limitation | Implication |
+|------------|-------------|
+| **Full in-RAM** | Your dataset must fit in memory. OS swap will kill performance. |
+| **Single writer** | Only one process can open a data directory at a time. |
+| **Read-only clients** | The remote protocol only supports `GET` operations. All writes go through the primary. |
+| **Fixed key size** | Keys are exactly 8 bytes. Hash or truncate larger identifiers. |
+| **Value size cap** | Maximum 65,535 bytes per value. |
 
-## Examples
+---
 
-```
+## Running the Examples
+
+```bash
+# Basic CRUD operations
 cargo run --example basic_usage
+
+# Chain reorganization simulation
 cargo run --example blockchain_reorg
+
+# Parallel processing (release mode recommended)
 cargo run --example parallel_processing --release
-cargo run --example sparse_blocks
-cargo run --example observability
+
+# Remote client/server demo
 cargo run --example network_client
+
+# Metrics and health monitoring
+cargo run --example observability
 ```
 
-Each example is documented in `examples/README.md` and covers CRUD operations, chain reorganizations, sparse blocks, parallel workloads, and observability tooling. Example runs create data under `./data/`; remove it with `rm -rf data/`.
+Examples store data in `./data/`. Clean up with:
 
-## Development
+```bash
+rm -rf data/
+```
 
-```
-cargo fmt
-cargo clippy --all-targets --all-features
-cargo test --all-targets
-cargo check --examples
-```
+---
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
+

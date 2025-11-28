@@ -1,6 +1,7 @@
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use heed::byteorder::BigEndian;
 use heed::types::{Bytes, SerdeBincode, Str, U64};
@@ -8,7 +9,9 @@ use heed::{Database, Env};
 
 use crate::error::{MhinStoreError, StoreResult};
 use crate::orchestrator::DurabilityMode;
-use crate::storage::metadata::{MetadataStore, ShardLayout};
+#[cfg(test)]
+use crate::storage::journal::JournalPruneReport;
+use crate::storage::metadata::{GcWatermark, MetadataStore, ShardLayout};
 use crate::types::{BlockId, JournalMeta};
 
 mod durability;
@@ -23,6 +26,8 @@ pub struct LmdbMetadataStore {
     state_db: Database<Str, SerdeBincode<BlockId>>,
     config_db: Database<Str, Bytes>,
     journal_offsets_db: Database<U64<BigEndian>, SerdeBincode<JournalMeta>>,
+    gc_watermark_db: Database<Str, Bytes>,
+    snapshot_watermark_db: Database<Str, SerdeBincode<BlockId>>,
 }
 
 impl LmdbMetadataStore {
@@ -31,6 +36,11 @@ impl LmdbMetadataStore {
     const DURABILITY_MODE_KEY: &'static str = "durability_mode";
     const LMDB_MAP_SIZE_KEY: &'static str = "lmdb_map_size";
     const JOURNAL_CHUNK_SIZE_KEY: &'static str = "journal_chunk_size_bytes";
+    const MIN_ROLLBACK_WINDOW_KEY: &'static str = "min_rollback_window";
+    const PRUNE_INTERVAL_KEY: &'static str = "prune_interval_nanos";
+    const BOOTSTRAP_BLOCK_PROFILE_KEY: &'static str = "bootstrap_block_profile";
+    const GC_WATERMARK_KEY: &'static str = "pending_plan";
+    const SNAPSHOT_WATERMARK_KEY: &'static str = "latest_snapshot_block";
     const DEFAULT_MAP_SIZE: usize = env::DEFAULT_MAP_SIZE;
 
     /// Creates a new LMDB metadata store with the default map size.
@@ -83,6 +93,8 @@ impl LmdbMetadataStore {
             state_db: handles.state_db,
             config_db: handles.config_db,
             journal_offsets_db: handles.journal_offsets_db,
+            gc_watermark_db: handles.gc_watermark_db,
+            snapshot_watermark_db: handles.snapshot_watermark_db,
         }
     }
 
@@ -156,6 +168,113 @@ impl LmdbMetadataStore {
         txn.commit()?;
         Ok(())
     }
+
+    pub fn load_min_rollback_window(&self) -> StoreResult<Option<BlockId>> {
+        let txn = self.env.read_txn()?;
+        if let Some(bytes) = self.config_db.get(&txn, Self::MIN_ROLLBACK_WINDOW_KEY)? {
+            let stored: BlockId = bincode::deserialize(bytes)?;
+            Ok(Some(stored))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn store_min_rollback_window(&self, window: BlockId) -> StoreResult<()> {
+        let mut txn = self.env.write_txn()?;
+        let encoded = bincode::serialize(&window)?;
+        self.config_db
+            .put(&mut txn, Self::MIN_ROLLBACK_WINDOW_KEY, &encoded)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn load_prune_interval(&self) -> StoreResult<Option<Duration>> {
+        let txn = self.env.read_txn()?;
+        if let Some(bytes) = self.config_db.get(&txn, Self::PRUNE_INTERVAL_KEY)? {
+            let stored: u64 = bincode::deserialize(bytes)?;
+            Ok(Some(Duration::from_nanos(stored)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn store_prune_interval(&self, interval: Duration) -> StoreResult<()> {
+        let mut txn = self.env.write_txn()?;
+        let nanos = interval.as_nanos().min(u64::MAX as u128) as u64;
+        let encoded = bincode::serialize(&nanos)?;
+        self.config_db
+            .put(&mut txn, Self::PRUNE_INTERVAL_KEY, &encoded)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn load_bootstrap_block_profile(&self) -> StoreResult<Option<u64>> {
+        let txn = self.env.read_txn()?;
+        if let Some(bytes) = self
+            .config_db
+            .get(&txn, Self::BOOTSTRAP_BLOCK_PROFILE_KEY)?
+        {
+            let stored: u64 = bincode::deserialize(bytes)?;
+            Ok(Some(stored))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn store_bootstrap_block_profile(&self, profile: u64) -> StoreResult<()> {
+        let mut txn = self.env.write_txn()?;
+        let encoded = bincode::serialize(&profile)?;
+        self.config_db
+            .put(&mut txn, Self::BOOTSTRAP_BLOCK_PROFILE_KEY, &encoded)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn load_gc_watermark(&self) -> StoreResult<Option<GcWatermark>> {
+        let txn = self.env.read_txn()?;
+        if let Some(bytes) = self.gc_watermark_db.get(&txn, Self::GC_WATERMARK_KEY)? {
+            Ok(Some(bincode::deserialize(bytes)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn store_gc_watermark(&self, watermark: &GcWatermark) -> StoreResult<()> {
+        let mut txn = self.env.write_txn()?;
+        let encoded = bincode::serialize(watermark)?;
+        self.gc_watermark_db
+            .put(&mut txn, Self::GC_WATERMARK_KEY, &encoded)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_gc_watermark(&self) -> StoreResult<()> {
+        let mut txn = self.env.write_txn()?;
+        self.gc_watermark_db
+            .delete(&mut txn, Self::GC_WATERMARK_KEY)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn load_snapshot_watermark(&self) -> StoreResult<Option<BlockId>> {
+        let txn = self.env.read_txn()?;
+        if let Some(value) = self
+            .snapshot_watermark_db
+            .get(&txn, Self::SNAPSHOT_WATERMARK_KEY)?
+        {
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn store_snapshot_watermark(&self, block: BlockId) -> StoreResult<()> {
+        let mut txn = self.env.write_txn()?;
+        self.snapshot_watermark_db
+            .put(&mut txn, Self::SNAPSHOT_WATERMARK_KEY, &block)?;
+        txn.commit()?;
+        Ok(())
+    }
 }
 
 impl Clone for LmdbMetadataStore {
@@ -166,6 +285,8 @@ impl Clone for LmdbMetadataStore {
             state_db: self.state_db,
             config_db: self.config_db,
             journal_offsets_db: self.journal_offsets_db,
+            gc_watermark_db: self.gc_watermark_db,
+            snapshot_watermark_db: self.snapshot_watermark_db,
         }
     }
 }
@@ -256,6 +377,29 @@ impl MetadataStore for LmdbMetadataStore {
         Ok(())
     }
 
+    fn prune_journal_offsets_at_or_before(&self, block: BlockId) -> StoreResult<usize> {
+        let mut txn = self.env.write_txn()?;
+        let current_block = self
+            .state_db
+            .get(&txn, Self::CURRENT_BLOCK_KEY)?
+            .unwrap_or(0);
+        let iter = self.journal_offsets_db.range(&txn, &(0..=block))?;
+        let mut removed = 0usize;
+        let mut to_remove = Vec::new();
+        for result in iter {
+            let (key, _) = result?;
+            to_remove.push(key);
+        }
+        for key in to_remove {
+            self.journal_offsets_db.delete(&mut txn, &key)?;
+            removed += 1;
+        }
+        self.state_db
+            .put(&mut txn, Self::CURRENT_BLOCK_KEY, &current_block)?;
+        txn.commit()?;
+        Ok(removed)
+    }
+
     fn record_block_commit(&self, block: BlockId, meta: &JournalMeta) -> StoreResult<()> {
         let mut txn = self.env.write_txn()?;
         self.journal_offsets_db.put(&mut txn, &block, meta)?;
@@ -283,6 +427,26 @@ impl MetadataStore for LmdbMetadataStore {
         txn.commit()?;
         Ok(())
     }
+
+    fn load_gc_watermark(&self) -> StoreResult<Option<GcWatermark>> {
+        LmdbMetadataStore::load_gc_watermark(self)
+    }
+
+    fn store_gc_watermark(&self, watermark: &GcWatermark) -> StoreResult<()> {
+        LmdbMetadataStore::store_gc_watermark(self, watermark)
+    }
+
+    fn clear_gc_watermark(&self) -> StoreResult<()> {
+        LmdbMetadataStore::clear_gc_watermark(self)
+    }
+
+    fn load_snapshot_watermark(&self) -> StoreResult<Option<BlockId>> {
+        LmdbMetadataStore::load_snapshot_watermark(self)
+    }
+
+    fn store_snapshot_watermark(&self, block: BlockId) -> StoreResult<()> {
+        LmdbMetadataStore::store_snapshot_watermark(self, block)
+    }
 }
 
 #[cfg(test)]
@@ -290,10 +454,12 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use tempfile::tempdir_in;
 
     use crate::error::MhinStoreError;
+    use crate::storage::journal::ChunkDeletionPlan;
 
     fn sample_meta(block_height: BlockId, chunk_offset: u64) -> JournalMeta {
         JournalMeta {
@@ -344,6 +510,97 @@ mod tests {
 
         let empty = store.get_journal_offsets(4..=6).unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn pruning_config_round_trip() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let store = LmdbMetadataStore::new(tmp.path()).unwrap();
+
+        assert!(store.load_min_rollback_window().unwrap().is_none());
+        store.store_min_rollback_window(256).unwrap();
+        assert_eq!(store.load_min_rollback_window().unwrap(), Some(256));
+
+        let interval = Duration::from_millis(750);
+        store.store_prune_interval(interval).unwrap();
+        assert_eq!(store.load_prune_interval().unwrap(), Some(interval));
+
+        assert!(store.load_bootstrap_block_profile().unwrap().is_none());
+        store.store_bootstrap_block_profile(42).unwrap();
+        assert_eq!(store.load_bootstrap_block_profile().unwrap(), Some(42));
+    }
+
+    #[test]
+    fn prune_journal_offsets_removes_range() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let store = LmdbMetadataStore::new(tmp.path()).unwrap();
+
+        for block in 0..5 {
+            let meta = sample_meta(block, block * 64);
+            store.put_journal_offset(block, &meta).unwrap();
+        }
+
+        let removed = store
+            .prune_journal_offsets_at_or_before(2)
+            .expect("prune succeeds");
+        assert_eq!(removed, 3);
+
+        let remaining = store.get_journal_offsets(0..=5).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].block_height, 3);
+        assert_eq!(remaining[1].block_height, 4);
+    }
+
+    #[test]
+    fn gc_watermark_round_trip() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let store = LmdbMetadataStore::new(tmp.path()).unwrap();
+
+        assert!(store.load_gc_watermark().unwrap().is_none());
+
+        let plan = ChunkDeletionPlan {
+            chunk_ids: vec![1, 2, 3],
+        };
+        let staged_path = tmp.path().join("journal").join("journal.idx.staged");
+        let watermark = GcWatermark {
+            pruned_through: 42,
+            chunk_plan: plan.clone(),
+            staged_index_path: staged_path.clone(),
+            baseline_entry_count: 0,
+            report: JournalPruneReport {
+                pruned_through: 42,
+                chunks_removed: plan.chunk_ids.len(),
+                entries_removed: 0,
+                bytes_freed: 0,
+            },
+        };
+        store.store_gc_watermark(&watermark).unwrap();
+
+        let loaded = store.load_gc_watermark().unwrap().unwrap();
+        assert_eq!(loaded.pruned_through, 42);
+        assert_eq!(loaded.chunk_plan.chunk_ids, plan.chunk_ids);
+        assert_eq!(loaded.staged_index_path, staged_path);
+
+        store.clear_gc_watermark().unwrap();
+        assert!(store.load_gc_watermark().unwrap().is_none());
+    }
+
+    #[test]
+    fn snapshot_watermark_round_trip() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let store = LmdbMetadataStore::new(tmp.path()).unwrap();
+
+        assert!(store.load_snapshot_watermark().unwrap().is_none());
+        store.store_snapshot_watermark(77).unwrap();
+        assert_eq!(store.load_snapshot_watermark().unwrap(), Some(77));
     }
 
     #[test]

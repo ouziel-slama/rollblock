@@ -511,6 +511,8 @@ fn default_orchestrator_applies_relaxed_policy_from_settings() {
         },
         snapshot_interval: Duration::from_secs(3600),
         max_snapshot_interval: Duration::from_secs(3600),
+        min_rollback_window: BlockId::MAX,
+        prune_interval: Duration::from_secs(10),
     };
 
     DefaultBlockOrchestrator::new(

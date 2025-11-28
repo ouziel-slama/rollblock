@@ -161,6 +161,7 @@ impl StoreHarnessBuilder {
             self.thread_count,
             false,
         )
+        .expect("valid harness config")
         .with_lmdb_map_size(HARNESS_LMDB_MAP_SIZE)
         .without_remote_server();
         config.durability_mode = self.durability_mode.clone();

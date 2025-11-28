@@ -1,6 +1,8 @@
 use std::ops::RangeInclusive;
+use std::path::PathBuf;
 
 use crate::error::StoreResult;
+use crate::storage::journal::{ChunkDeletionPlan, JournalPruneReport};
 use crate::types::{BlockId, JournalMeta};
 
 pub mod lmdb;
@@ -13,6 +15,15 @@ pub struct ShardLayout {
     pub initial_capacity: usize,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GcWatermark {
+    pub pruned_through: BlockId,
+    pub chunk_plan: ChunkDeletionPlan,
+    pub staged_index_path: PathBuf,
+    pub baseline_entry_count: usize,
+    pub report: JournalPruneReport,
+}
+
 pub trait MetadataStore: Send + Sync {
     fn current_block(&self) -> StoreResult<BlockId>;
     fn set_current_block(&self, block: BlockId) -> StoreResult<()>;
@@ -21,6 +32,25 @@ pub trait MetadataStore: Send + Sync {
     fn last_journal_offset_at_or_before(&self, block: BlockId) -> StoreResult<Option<JournalMeta>>;
     fn remove_journal_offsets_after(&self, block: BlockId) -> StoreResult<()> {
         let _ = block;
+        Ok(())
+    }
+    fn prune_journal_offsets_at_or_before(&self, block: BlockId) -> StoreResult<usize> {
+        let _ = block;
+        Ok(0)
+    }
+    fn load_gc_watermark(&self) -> StoreResult<Option<GcWatermark>> {
+        Ok(None)
+    }
+    fn store_gc_watermark(&self, _watermark: &GcWatermark) -> StoreResult<()> {
+        Ok(())
+    }
+    fn clear_gc_watermark(&self) -> StoreResult<()> {
+        Ok(())
+    }
+    fn load_snapshot_watermark(&self) -> StoreResult<Option<BlockId>> {
+        Ok(None)
+    }
+    fn store_snapshot_watermark(&self, _block: BlockId) -> StoreResult<()> {
         Ok(())
     }
 

@@ -24,7 +24,7 @@
 //!     1000,         // initial capacity per shard
 //!     1,            // thread count (1 = sequential mode)
 //!     false,        // use compression (default: false)
-//! );
+//! )?;
 //!
 //! // Initialize store
 //! let store = MhinStoreFacade::new(config)?;
@@ -53,9 +53,9 @@
 //! # Ok::<(), rollblock::error::MhinStoreError>(())
 //! ```
 //! Networking is opt-in: call `.enable_remote_server()` (or
-//! `.with_remote_server(...)`) to start the embedded server, which binds to
-//! `127.0.0.1:9443` with Basic Auth credentials `proto`/`proto` unless you
-//! override `RemoteServerSettings`.
+//! `.with_remote_server(...)`) to start the embedded server. It binds to
+//! `127.0.0.1:9443` by default but refuses to start until you override the
+//! placeholder Basic Auth credentials via `RemoteServerSettings::with_basic_auth(...)`.
 
 pub mod api;
 pub mod client;
@@ -91,7 +91,8 @@ pub use state::engine::{ShardedStateEngine, StateEngine};
 pub use state::shard::{RawTableShard, StateShard};
 pub use storage::fs::store_lock::StoreLockGuard;
 pub use storage::journal::{
-    BlockJournal, FileBlockJournal, JournalBlock, JournalIter, JournalOptions, SyncPolicy,
+    BlockJournal, FileBlockJournal, JournalBlock, JournalIter, JournalOptions,
+    JournalPruneObserver, JournalPruneReport, JournalPruner, SyncPolicy,
 };
 pub use storage::metadata::{LmdbMetadataStore, MetadataStore, ShardLayout};
 pub use storage::snapshot::{MmapSnapshotter, Snapshotter};

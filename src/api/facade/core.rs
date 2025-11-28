@@ -31,7 +31,7 @@ pub struct MhinStoreFacade {
     orchestrator: Arc<dyn BlockOrchestrator>,
     metadata: Option<Arc<LmdbMetadataStore>>,
     durability_mode: Arc<RwLock<DurabilityMode>>,
-    lock: Option<Arc<StoreLockGuard>>,
+    lock: Option<Arc<SharedStoreLock>>,
     shutdown_state: Arc<AtomicBool>,
     handle_count: Arc<AtomicUsize>,
     remote_server: Option<RemoteServerController>,
@@ -73,17 +73,17 @@ impl MhinStoreFacade {
     /// ```ignore
     /// use rollblock::{MhinStoreFacade, StoreConfig};
     ///
-    /// let config = StoreConfig::new("./data", 4, 1000, 1, false);
+    /// let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
     /// let store = MhinStoreFacade::new(config)?;
     /// ```
     pub fn new(config: StoreConfig) -> StoreResult<Self> {
         let lock = StoreLockGuard::acquire(&config.data_dir)?;
-        let lock = Arc::new(lock);
+        let lock = Arc::new(SharedStoreLock::new(lock));
 
         Self::build(config, lock)
     }
 
-    fn build(config: StoreConfig, lock: Arc<StoreLockGuard>) -> StoreResult<Self> {
+    fn build(config: StoreConfig, lock: Arc<SharedStoreLock>) -> StoreResult<Self> {
         std::fs::create_dir_all(&config.data_dir)?;
 
         let metadata = Arc::new(LmdbMetadataStore::new_with_map_size(
@@ -117,6 +117,48 @@ impl MhinStoreFacade {
             Some(_) => {}
             None => {
                 metadata.store_journal_chunk_size(config.journal_chunk_size_bytes)?;
+            }
+        }
+        match metadata.load_min_rollback_window()? {
+            Some(stored) if stored != config.min_rollback_window => {
+                tracing::info!(
+                    stored_window = stored,
+                    configured_window = config.min_rollback_window,
+                    "Configured rollback window overrides stored value; persisting new setting"
+                );
+                metadata.store_min_rollback_window(config.min_rollback_window)?;
+            }
+            Some(_) => {}
+            None => {
+                metadata.store_min_rollback_window(config.min_rollback_window)?;
+            }
+        }
+        match metadata.load_prune_interval()? {
+            Some(stored) if stored != config.prune_interval => {
+                tracing::info!(
+                    stored_interval_ms = stored.as_millis(),
+                    configured_interval_ms = config.prune_interval.as_millis(),
+                    "Configured prune interval overrides stored value; persisting new setting"
+                );
+                metadata.store_prune_interval(config.prune_interval)?;
+            }
+            Some(_) => {}
+            None => {
+                metadata.store_prune_interval(config.prune_interval)?;
+            }
+        }
+        match metadata.load_bootstrap_block_profile()? {
+            Some(stored) if stored != config.bootstrap_block_profile => {
+                tracing::info!(
+                    stored_profile = stored,
+                    configured_profile = config.bootstrap_block_profile,
+                    "Configured bootstrap block profile overrides stored value; persisting new setting"
+                );
+                metadata.store_bootstrap_block_profile(config.bootstrap_block_profile)?;
+            }
+            Some(_) => {}
+            None => {
+                metadata.store_bootstrap_block_profile(config.bootstrap_block_profile)?;
             }
         }
         let sync_policy = match &config.durability_mode {
@@ -181,11 +223,63 @@ impl MhinStoreFacade {
             restored_block,
         )?;
 
+        let sizing_snapshot = journal.sizing_snapshot(StoreConfig::prune_sample_window())?;
+        let prune_diagnostics = config.pruning_diagnostics(&sizing_snapshot)?;
+        if prune_diagnostics.pruning_disabled {
+            tracing::info!("Journal pruning disabled via configuration");
+        } else if prune_diagnostics.waiting_for_history {
+            tracing::info!(
+                sample_size = prune_diagnostics.sample_size,
+                required_window = prune_diagnostics.required_window,
+                min_window = prune_diagnostics.min_window,
+                "Journal pruning deferred until sufficient history accumulates"
+            );
+        } else if prune_diagnostics.used_bootstrap {
+            tracing::info!(
+                bootstrap_profile = config.bootstrap_block_profile,
+                sample_size = prune_diagnostics.sample_size,
+                "Using bootstrap block profile for pruning validation until history accumulates"
+            );
+        } else if !prune_diagnostics.window_satisfied {
+            tracing::warn!(
+                min_window = prune_diagnostics.min_window,
+                required_window = prune_diagnostics.required_window,
+                blocks_per_chunk = prune_diagnostics.blocks_per_chunk,
+                safety_chunk_span = prune_diagnostics.safety_chunk_span,
+                observed_block_bytes = prune_diagnostics.observed_block_bytes,
+                "Advisory: heuristics recommend a larger rollback window. Pruning still honors the configured minimum (>0 is the only enforced constraint)."
+            );
+        } else {
+            tracing::info!(
+                min_window = prune_diagnostics.min_window,
+                required_window = prune_diagnostics.required_window,
+                blocks_per_chunk = prune_diagnostics.blocks_per_chunk,
+                safety_chunk_span = prune_diagnostics.safety_chunk_span,
+                observed_block_bytes = prune_diagnostics.observed_block_bytes,
+                "Journal pruning heuristics satisfied (advisory only)"
+            );
+        }
+
         let persistence_settings = crate::orchestrator::PersistenceSettings {
             durability_mode: config.durability_mode.clone(),
             snapshot_interval: config.snapshot_interval,
             max_snapshot_interval: config.max_snapshot_interval,
+            min_rollback_window: prune_diagnostics.min_window,
+            prune_interval: prune_diagnostics.prune_interval,
         };
+
+        if config.snapshot_interval.is_zero()
+            && config.max_snapshot_interval.is_zero()
+            && matches!(
+                config.durability_mode,
+                DurabilityMode::Async { .. } | DurabilityMode::AsyncRelaxed { .. }
+            )
+        {
+            tracing::warn!(
+                durability_mode = ?config.durability_mode,
+                "Asynchronous durability enabled but automatic snapshots are disabled; crash recovery will rely solely on journal replay"
+            );
+        }
 
         let orchestrator: Arc<dyn BlockOrchestrator> = Arc::new(DefaultBlockOrchestrator::new(
             Arc::clone(&engine),
@@ -443,7 +537,12 @@ impl MhinStoreFacade {
         }
 
         match self.orchestrator.shutdown() {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(lock) = &self.lock {
+                    lock.release();
+                }
+                Ok(())
+            }
             Err(err) => {
                 self.shutdown_state.store(false, Ordering::Release);
                 Err(err)
@@ -549,12 +648,33 @@ impl Drop for MhinStoreFacade {
             );
             // We intentionally leave the shutdown flag set to prevent repeated attempts.
         }
+
+        if let Some(lock) = &self.lock {
+            lock.release();
+        }
     }
 }
 
 #[derive(Clone)]
 struct RemoteServerController {
     shared: Arc<RemoteServerShared>,
+}
+
+struct SharedStoreLock {
+    guard: Mutex<Option<StoreLockGuard>>,
+}
+
+impl SharedStoreLock {
+    fn new(guard: StoreLockGuard) -> Self {
+        Self {
+            guard: Mutex::new(Some(guard)),
+        }
+    }
+
+    fn release(&self) {
+        let mut guard = self.guard.lock().unwrap();
+        guard.take();
+    }
 }
 
 struct RemoteServerShared {
@@ -566,6 +686,12 @@ struct RemoteServerShared {
 
 impl RemoteServerController {
     fn spawn(store: &MhinStoreFacade, settings: RemoteServerSettings) -> StoreResult<Self> {
+        let username_missing = settings.auth.username.trim().is_empty();
+        let password_missing = settings.auth.password.trim().is_empty();
+        if username_missing || password_missing || settings.uses_default_auth() {
+            return Err(MhinStoreError::RemoteServerCredentialsMissing);
+        }
+
         let worker_threads = settings.worker_threads.max(1);
         let runtime = TokioRuntimeBuilder::new_multi_thread()
             .worker_threads(worker_threads)

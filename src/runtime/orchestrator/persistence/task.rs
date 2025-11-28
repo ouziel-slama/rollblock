@@ -50,7 +50,7 @@ pub enum TaskStatus {
 pub struct PersistenceTask {
     pub block_height: BlockId,
     pub operations: Vec<Operation>,
-    pub undo: BlockUndo,
+    undo: Mutex<Option<Arc<BlockUndo>>>,
     pub metrics: ApplyMetricsContext,
     cancelled: AtomicBool,
     status: Mutex<TaskStatus>,
@@ -61,18 +61,30 @@ impl PersistenceTask {
     pub fn new(
         block_height: BlockId,
         operations: Vec<Operation>,
-        undo: BlockUndo,
+        undo: Arc<BlockUndo>,
         metrics: ApplyMetricsContext,
     ) -> Arc<Self> {
         Arc::new(Self {
             block_height,
             operations,
-            undo,
+            undo: Mutex::new(Some(undo)),
             metrics,
             cancelled: AtomicBool::new(false),
             status: Mutex::new(TaskStatus::Pending),
             status_cv: Condvar::new(),
         })
+    }
+
+    pub fn clone_undo(&self) -> Arc<BlockUndo> {
+        self.undo
+            .lock()
+            .as_ref()
+            .expect("undo released before persistence began")
+            .clone()
+    }
+
+    pub fn release_undo(&self) -> Option<Arc<BlockUndo>> {
+        self.undo.lock().take()
     }
 
     pub fn mark_cancelled(&self) {

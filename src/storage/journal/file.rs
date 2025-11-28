@@ -1,6 +1,8 @@
-use std::fs::{File, OpenOptions};
-use std::io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, ErrorKind, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -16,24 +18,40 @@ use super::format::{
 };
 use super::{
     chunk::{chunk_file_path, enumerate_chunk_files},
-    BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, JournalOptions, SyncPolicy,
+    ActiveChunkResolver, BlockJournal, ChunkDeletionPlan, FilePlanContext, JournalAppendOutcome,
+    JournalBlock, JournalIter, JournalOptions, JournalPrunePlan, JournalPruneReport,
+    JournalSizingSnapshot, SyncPolicy,
 };
 
 pub struct FileBlockJournal {
     root_dir: PathBuf,
     index_path: PathBuf,
-    write_lock: Mutex<()>,
+    write_lock: Arc<Mutex<()>>,
     options: JournalOptions,
     /// Sync policy stored separately for runtime modification.
     sync_policy: RwLock<SyncPolicy>,
     /// Lazily opened journal file handle shared across appends.
-    journal_state: Mutex<Option<JournalFileState>>,
+    journal_state: Arc<Mutex<Option<JournalFileState>>>,
 }
 
 struct JournalFileState {
     chunk_id: u32,
     file: File,
     current_offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ChunkSummary {
+    max_block: BlockId,
+    entry_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PruneCandidate {
+    chunk_id: u32,
+    max_block: BlockId,
+    entries_removed: usize,
+    bytes_freed: u64,
 }
 
 impl FileBlockJournal {
@@ -54,10 +72,10 @@ impl FileBlockJournal {
         Ok(Self {
             root_dir,
             index_path,
-            write_lock: Mutex::new(()),
+            write_lock: Arc::new(Mutex::new(())),
             options,
             sync_policy,
-            journal_state: Mutex::new(None),
+            journal_state: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -93,8 +111,109 @@ impl FileBlockJournal {
         Ok(JOURNAL_HEADER_SIZE as u64 + payload.len() as u64)
     }
 
+    fn staged_index_path(&self) -> PathBuf {
+        self.index_path.with_extension("idx.gc")
+    }
+
+    fn active_chunk_resolver(&self) -> ActiveChunkResolver {
+        let journal_state = Arc::clone(&self.journal_state);
+        Arc::new(move || Ok(journal_state.lock().as_ref().map(|state| state.chunk_id)))
+    }
+
+    fn write_staged_index(&self, metas: &[JournalMeta]) -> StoreResult<PathBuf> {
+        let staged_path = self.staged_index_path();
+        if staged_path.exists() {
+            fs::remove_file(&staged_path)?;
+        }
+        if let Some(parent) = staged_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&staged_path)?;
+        for meta in metas {
+            let bytes = bincode::serialize(meta)?;
+            file.write_all(&bytes)?;
+        }
+        file.sync_all()?;
+        if let Some(parent) = staged_path.parent() {
+            sync_directory(parent)?;
+        }
+        Ok(staged_path)
+    }
+
+    fn summarize_chunk_stats(metas: &[JournalMeta]) -> HashMap<u32, ChunkSummary> {
+        let mut stats = HashMap::new();
+        for meta in metas {
+            stats
+                .entry(meta.chunk_id)
+                .and_modify(|entry: &mut ChunkSummary| {
+                    entry.max_block = entry.max_block.max(meta.block_height);
+                    entry.entry_count += 1;
+                })
+                .or_insert(ChunkSummary {
+                    max_block: meta.block_height,
+                    entry_count: 1,
+                });
+        }
+        stats
+    }
+
+    fn collect_prune_candidates(
+        sealed_chunks: &[(u32, PathBuf)],
+        chunk_stats: &HashMap<u32, ChunkSummary>,
+        block: BlockId,
+    ) -> StoreResult<Vec<PruneCandidate>> {
+        let mut candidates = Vec::new();
+        for (chunk_id, path) in sealed_chunks {
+            let Some(stats) = chunk_stats.get(chunk_id) else {
+                continue;
+            };
+            if stats.entry_count == 0 || stats.max_block > block {
+                continue;
+            }
+            let bytes_freed = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            candidates.push(PruneCandidate {
+                chunk_id: *chunk_id,
+                max_block: stats.max_block,
+                entries_removed: stats.entry_count,
+                bytes_freed,
+            });
+        }
+        Ok(candidates)
+    }
+
     pub fn root_dir(&self) -> &Path {
         &self.root_dir
+    }
+
+    pub fn sizing_snapshot(&self, sample_window: usize) -> StoreResult<JournalSizingSnapshot> {
+        let sample_len = sample_window.max(1);
+        let mut recent = VecDeque::with_capacity(sample_len);
+        self.visit_index(|meta| {
+            if recent.len() == sample_len {
+                recent.pop_front();
+            }
+            recent.push_back(meta);
+        })?;
+        let entry_sizes: Vec<u64> = recent
+            .into_iter()
+            .map(|meta| JOURNAL_HEADER_SIZE as u64 + meta.compressed_len)
+            .collect();
+        let chunks = enumerate_chunk_files(&self.root_dir)?;
+        let chunk_count = chunks.len();
+        let sealed_chunk_count = chunk_count.saturating_sub(1);
+        let min_entry_size_bytes = Self::minimum_entry_size_bytes(&self.options)?;
+        Ok(JournalSizingSnapshot {
+            entry_sizes,
+            sealed_chunk_count,
+            chunk_count,
+            min_entry_size_bytes,
+            max_chunk_size_bytes: self.options.max_chunk_size_bytes,
+        })
     }
 
     fn open_index_for_append(&self) -> StoreResult<(File, bool)> {
@@ -221,21 +340,24 @@ impl FileBlockJournal {
     }
 
     fn load_index(&self) -> StoreResult<Vec<JournalMeta>> {
+        let mut metas = Vec::new();
+        self.visit_index(|meta| metas.push(meta))?;
+        Ok(metas)
+    }
+
+    fn visit_index(&self, mut on_entry: impl FnMut(JournalMeta)) -> StoreResult<()> {
         if !self.index_path.exists() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
-        let mut file = File::open(&self.index_path)?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
+        let file = File::open(&self.index_path)?;
+        let file_len = file.metadata()?.len();
+        let mut reader = BufReader::new(file);
 
-        let mut cursor = Cursor::new(data);
-        let mut metas = Vec::new();
-
-        while (cursor.position() as usize) < cursor.get_ref().len() {
-            let start = cursor.position();
-            match bincode::deserialize_from(&mut cursor) {
-                Ok(meta) => metas.push(meta),
+        loop {
+            let entry_offset = reader.stream_position()?;
+            match bincode::deserialize_from(&mut reader) {
+                Ok(meta) => on_entry(meta),
                 Err(err) => {
                     // Tolerate a trailing partial entry caused by a crash mid-write.
                     if matches!(
@@ -243,10 +365,12 @@ impl FileBlockJournal {
                         bincode::ErrorKind::Io(ref io_err)
                             if io_err.kind() == std::io::ErrorKind::UnexpectedEof
                     ) {
-                        tracing::warn!(
-                            offset = start,
-                            "Detected truncated journal index entry; ignoring trailing bytes"
-                        );
+                        if entry_offset < file_len {
+                            tracing::warn!(
+                                offset = entry_offset,
+                                "Detected truncated journal index entry; ignoring trailing bytes"
+                            );
+                        }
                         break;
                     }
                     return Err(err.into());
@@ -254,7 +378,7 @@ impl FileBlockJournal {
             }
         }
 
-        Ok(metas)
+        Ok(())
     }
 }
 
@@ -452,6 +576,118 @@ impl BlockJournal for FileBlockJournal {
     fn scan_entries(&self) -> StoreResult<Vec<JournalMeta>> {
         let _guard = self.write_lock.lock();
         super::maintenance::scan_entries(&self.root_dir)
+    }
+
+    fn plan_prune_chunks_ending_at_or_before(
+        &self,
+        block: BlockId,
+    ) -> StoreResult<Option<JournalPrunePlan>> {
+        if block == 0 {
+            return Ok(None);
+        }
+
+        let metas = self.load_index()?;
+        if metas.is_empty() {
+            return Ok(None);
+        }
+
+        let chunk_listing = enumerate_chunk_files(&self.root_dir)?;
+        if chunk_listing.len() <= 1 {
+            return Ok(None);
+        }
+
+        let sealed_len = chunk_listing.len().saturating_sub(1);
+        if sealed_len == 0 {
+            return Ok(None);
+        }
+        let sealed_chunks = &chunk_listing[..sealed_len];
+
+        let chunk_stats = Self::summarize_chunk_stats(&metas);
+        let mut candidates = Self::collect_prune_candidates(sealed_chunks, &chunk_stats, block)?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        if sealed_len == 1 {
+            return Ok(None);
+        }
+
+        if candidates.len() >= sealed_len {
+            candidates.sort_by_key(|c| c.chunk_id);
+            while candidates.len() >= sealed_len {
+                candidates.pop();
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let chunk_ids: Vec<u32> = candidates.iter().map(|c| c.chunk_id).collect();
+        let removal_set: HashSet<u32> = chunk_ids.iter().copied().collect();
+        let baseline_entry_count = metas.len();
+        let retained: Vec<JournalMeta> = metas
+            .into_iter()
+            .filter(|meta| !removal_set.contains(&meta.chunk_id))
+            .collect();
+
+        let staged_index_path = self.write_staged_index(&retained)?;
+        let pruned_through = candidates
+            .iter()
+            .map(|candidate| candidate.max_block)
+            .max()
+            .unwrap_or(block);
+        let entries_removed: usize = candidates.iter().map(|c| c.entries_removed).sum();
+        let bytes_freed: u64 = candidates.iter().map(|c| c.bytes_freed).sum();
+
+        let report = JournalPruneReport {
+            pruned_through,
+            chunks_removed: chunk_ids.len(),
+            entries_removed,
+            bytes_freed,
+        };
+
+        let plan = JournalPrunePlan::file_plan(
+            report,
+            ChunkDeletionPlan { chunk_ids },
+            staged_index_path,
+            baseline_entry_count,
+            FilePlanContext::new(
+                self.root_dir.clone(),
+                self.index_path.clone(),
+                Arc::clone(&self.write_lock),
+                self.active_chunk_resolver(),
+            ),
+        );
+        Ok(Some(plan))
+    }
+
+    fn adopt_staged_prune_plan(
+        &self,
+        pruned_through: BlockId,
+        chunk_plan: ChunkDeletionPlan,
+        staged_index_path: PathBuf,
+        baseline_entry_count: usize,
+        mut report: JournalPruneReport,
+    ) -> StoreResult<JournalPrunePlan> {
+        if report.pruned_through == 0 {
+            report.pruned_through = pruned_through;
+        }
+        if report.chunks_removed == 0 {
+            report.chunks_removed = chunk_plan.chunk_ids.len();
+        }
+        Ok(JournalPrunePlan::recover_file_plan(
+            report,
+            chunk_plan,
+            staged_index_path,
+            baseline_entry_count,
+            FilePlanContext::new(
+                self.root_dir.clone(),
+                self.index_path.clone(),
+                Arc::clone(&self.write_lock),
+                self.active_chunk_resolver(),
+            ),
+        ))
     }
 }
 
@@ -777,6 +1013,203 @@ mod tests {
             seen.push(entry.unwrap().block_height);
         }
         assert_eq!(seen, vec![block_one + 2, block_one + 1, block_one]);
+    }
+
+    #[test]
+    fn plan_prunes_sealed_chunks_and_preserves_new_entries() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let block_one = 1;
+        let undo_one = sample_undo(block_one);
+        let operations_one = sample_operations(block_one);
+        let options = chunk_options_fitting_one_entry(block_one, &undo_one, &operations_one);
+        let journal = FileBlockJournal::with_options(tmp.path(), options).unwrap();
+
+        for block in 1..=4 {
+            let undo = sample_undo(block);
+            let operations = sample_operations(block);
+            journal.append(block, &undo, &operations).unwrap();
+        }
+
+        let mut plan = journal
+            .plan_prune_chunks_ending_at_or_before(2)
+            .expect("plan succeeds")
+            .expect("plan exists");
+
+        assert_eq!(plan.report().chunks_removed, 2);
+        assert_eq!(plan.chunk_plan().chunk_ids, vec![1, 2]);
+
+        let block_five = 5;
+        let undo_five = sample_undo(block_five);
+        let ops_five = sample_operations(block_five);
+        journal
+            .append(block_five, &undo_five, &ops_five)
+            .expect("append after plan succeeds");
+
+        plan.mark_persisted();
+        plan.commit().expect("commit succeeds");
+
+        assert!(!chunk_file_path(journal.root_dir(), 1).exists());
+        assert!(!chunk_file_path(journal.root_dir(), 2).exists());
+
+        let remaining: Vec<BlockId> = journal
+            .list_entries()
+            .unwrap()
+            .into_iter()
+            .map(|meta| meta.block_height)
+            .collect();
+        assert_eq!(remaining, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn plan_waits_when_only_one_historical_chunk_exists() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let block_one = 1;
+        let undo_one = sample_undo(block_one);
+        let operations_one = sample_operations(block_one);
+        let options = chunk_options_fitting_one_entry(block_one, &undo_one, &operations_one);
+        let journal = FileBlockJournal::with_options(tmp.path(), options).unwrap();
+
+        for block in 1..=2 {
+            let undo = sample_undo(block);
+            let operations = sample_operations(block);
+            journal.append(block, &undo, &operations).unwrap();
+        }
+
+        let plan = journal
+            .plan_prune_chunks_ending_at_or_before(1)
+            .expect("plan calculation succeeds");
+        assert!(
+            plan.is_none(),
+            "should refuse pruning when only one sealed chunk is available"
+        );
+    }
+
+    #[test]
+    fn prune_plan_aborts_when_candidate_reopens_before_commit() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let block_one = 1;
+        let undo_one = sample_undo(block_one);
+        let operations_one = sample_operations(block_one);
+        let options = chunk_options_fitting_one_entry(block_one, &undo_one, &operations_one);
+        let journal = FileBlockJournal::with_options(tmp.path(), options).unwrap();
+
+        for block in 1..=5 {
+            let undo = sample_undo(block);
+            let operations = sample_operations(block);
+            journal.append(block, &undo, &operations).unwrap();
+        }
+
+        let mut plan = journal
+            .plan_prune_chunks_ending_at_or_before(3)
+            .expect("plan calculation succeeds")
+            .expect("plan should exist");
+        plan.mark_persisted();
+
+        journal
+            .truncate_after(3)
+            .expect("truncate reopens the third chunk");
+
+        plan.commit()
+            .expect("commit should succeed but skip conflicting chunks");
+
+        assert!(
+            chunk_file_path(journal.root_dir(), 3).exists(),
+            "reopened chunk should not be pruned"
+        );
+        assert!(
+            chunk_file_path(journal.root_dir(), 1).exists(),
+            "plan abort should preserve other candidates"
+        );
+        assert!(
+            chunk_file_path(journal.root_dir(), 2).exists(),
+            "plan abort should preserve other candidates"
+        );
+        assert!(
+            !journal.staged_index_path().exists(),
+            "aborted plan should discard staged index"
+        );
+    }
+
+    #[test]
+    fn plan_replay_is_idempotent_after_recovery() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let block_one = 1;
+        let undo_one = sample_undo(block_one);
+        let ops_one = sample_operations(block_one);
+        let options = chunk_options_fitting_one_entry(block_one, &undo_one, &ops_one);
+        let journal = FileBlockJournal::with_options(tmp.path(), options).unwrap();
+
+        for block in 1..=5 {
+            let undo = sample_undo(block);
+            let operations = sample_operations(block);
+            journal.append(block, &undo, &operations).unwrap();
+        }
+
+        let mut plan = journal
+            .plan_prune_chunks_ending_at_or_before(2)
+            .expect("plan calculation succeeds")
+            .expect("plan exists");
+
+        let pruned_through = plan.report().pruned_through;
+        let chunk_plan = plan.chunk_plan().clone();
+        let staged_index_path = plan.staged_index_path().to_path_buf();
+        let baseline_entry_count = plan.baseline_entry_count();
+        let report = plan.report().clone();
+
+        plan.mark_persisted();
+        drop(plan);
+
+        // First replay simulates resuming immediately after a crash.
+        let mut recovered = journal
+            .adopt_staged_prune_plan(
+                pruned_through,
+                chunk_plan.clone(),
+                staged_index_path.clone(),
+                baseline_entry_count,
+                report.clone(),
+            )
+            .expect("recovered plan builds");
+        recovered.mark_persisted();
+        recovered.commit().expect("recovered commit succeeds");
+
+        assert!(
+            !chunk_file_path(journal.root_dir(), 1).exists()
+                && !chunk_file_path(journal.root_dir(), 2).exists(),
+            "first two chunks should be deleted after recovery"
+        );
+
+        // A second adoption should be a no-op but must remain successful.
+        let mut replay = journal
+            .adopt_staged_prune_plan(
+                pruned_through,
+                chunk_plan,
+                staged_index_path,
+                baseline_entry_count,
+                report,
+            )
+            .expect("idempotent plan builds");
+        replay.mark_persisted();
+        replay.commit().expect("idempotent commit succeeds");
+
+        let remaining: Vec<BlockId> = journal
+            .list_entries()
+            .unwrap()
+            .into_iter()
+            .map(|meta| meta.block_height)
+            .collect();
+        assert_eq!(remaining, vec![3, 4, 5]);
     }
 
     #[test]
