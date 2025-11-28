@@ -662,11 +662,7 @@ where
     }
 
     pub fn force_snapshot_if_overdue(&self) -> StoreResult<()> {
-        if self.max_snapshot_interval.is_zero() {
-            return Ok(());
-        }
-
-        if !self.is_snapshot_overdue() {
+        if self.max_snapshot_interval.is_zero() || !self.is_snapshot_overdue() {
             return Ok(());
         }
 
@@ -676,9 +672,8 @@ where
             return Ok(());
         }
 
-        self.wait_for_active_snapshot();
-
-        if !self.is_snapshot_overdue() {
+        if self.snapshot_inflight.load(Ordering::Acquire) {
+            // A snapshot is already running; let it finish without blocking callers.
             return Ok(());
         }
 
@@ -690,10 +685,7 @@ where
 
         self.flush()?;
 
-        // It's possible that flush triggered a regular snapshot in the background.
-        self.wait_for_active_snapshot();
-
-        if !self.is_snapshot_overdue() {
+        if !self.is_snapshot_overdue() || self.snapshot_inflight.load(Ordering::Acquire) {
             return Ok(());
         }
 
@@ -713,12 +705,6 @@ where
             return false;
         }
         self.last_snapshot.lock().elapsed() >= self.max_snapshot_interval
-    }
-
-    fn wait_for_active_snapshot(&self) {
-        while self.snapshot_inflight.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
     }
 
     fn run_snapshot_blocking(&self) -> StoreResult<bool> {

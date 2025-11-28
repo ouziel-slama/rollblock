@@ -263,15 +263,29 @@ fn async_snapshots_do_not_block_queue() {
         thread::sleep(Duration::from_millis(5));
     }
 
+    let mut progressed_while_snapshot = false;
+
     for block in 2..=5 {
         let key = [block as u8; 8];
         orchestrator
             .apply_operations(block, vec![operation(key, block * 10)])
             .unwrap();
+
+        if progressed_while_snapshot {
+            continue;
+        }
+
+        let poll_deadline = Instant::now() + Duration::from_millis(250);
+        while snapshot_in_progress.load(Ordering::Acquire) && Instant::now() < poll_deadline {
+            if orchestrator.durable_block_height().unwrap() >= block {
+                progressed_while_snapshot = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     let durable_deadline = Instant::now() + Duration::from_secs(2);
-    let mut progressed_while_snapshot = false;
     loop {
         let durable = orchestrator.durable_block_height().unwrap();
         if durable >= 5 {
