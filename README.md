@@ -1,5 +1,13 @@
 # Rollblock
 
+[![Tests](https://github.com/ouziel-slama/rollblock/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/ouziel-slama/rollblock/actions/workflows/test.yml)
+[![Coverage](https://codecov.io/gh/ouziel-slama/rollblock/branch/main/graph/badge.svg)](https://codecov.io/gh/ouziel-slama/rollblock)
+[![Clippy](https://github.com/ouziel-slama/rollblock/actions/workflows/clippy.yml/badge.svg?branch=main)](https://github.com/ouziel-slama/rollblock/actions/workflows/clippy.yml)
+[![Rustfmt](https://github.com/ouziel-slama/rollblock/actions/workflows/fmt.yml/badge.svg?branch=main)](https://github.com/ouziel-slama/rollblock/actions/workflows/fmt.yml)
+[![Crates.io](https://img.shields.io/crates/v/rollblock.svg)](https://crates.io/crates/rollblock)
+[![Docs.rs](https://docs.rs/rollblock/badge.svg)](https://docs.rs/rollblock)
+
+
 **A super-fast, block-oriented and rollbackable key-value store.**
 
 ---
