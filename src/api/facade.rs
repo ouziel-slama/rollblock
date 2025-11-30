@@ -90,6 +90,20 @@ pub trait StoreFacade: Send + Sync {
     /// are represented by `Value::empty()` in the returned vector.
     fn multi_get(&self, keys: &[Key]) -> StoreResult<Vec<Value>>;
 
+    /// Removes a key in a single write and returns its previous value.
+    ///
+    /// This behaves like a combined `get` + `set(Value::empty())`, but runs
+    /// under one orchestration lock so callers avoid the extra lookup and
+    /// serialization.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(value)` containing the removed bytes if the key existed.
+    /// * `Ok(Value::empty())` if the key was missing.
+    fn pop(&self, _block_height: BlockId, _key: Key) -> StoreResult<Value> {
+        pop_not_supported()
+    }
+
     /// Enables relaxed durability by syncing every N blocks instead of every block.
     ///
     /// This improves throughput during long catch-up phases at the cost of a larger
@@ -129,5 +143,11 @@ pub trait StoreFacade: Send + Sync {
 fn relaxed_mode_not_supported() -> StoreResult<()> {
     Err(MhinStoreError::UnsupportedOperation {
         reason: "relaxed durability mode is not supported by this StoreFacade".to_string(),
+    })
+}
+
+fn pop_not_supported() -> StoreResult<Value> {
+    Err(MhinStoreError::UnsupportedOperation {
+        reason: "pop is not supported by this StoreFacade".to_string(),
     })
 }

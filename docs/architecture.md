@@ -12,7 +12,7 @@ Rollblock is a **block-oriented, rollbackable key-value store** optimized for hi
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                       StoreFacade (API)                         │
-│                   set() · get() · rollback()                    │
+│              set() · pop() · get() · rollback()                 │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
@@ -82,11 +82,14 @@ The public surface. Users interact exclusively with the `StoreFacade` trait:
 ```rust
 pub trait StoreFacade {
     fn set(&self, block_height: BlockId, ops: Vec<Operation>) -> Result<()>;
+    fn pop(&self, block_height: BlockId, key: Key) -> Result<Value>;
     fn get(&self, key: Key) -> Result<Value>;
     fn rollback(&self, target: BlockId) -> Result<()>;
     fn close(&self) -> Result<()>;
 }
 ```
+
+`pop` removes a single key under the same mutation lock that `set` uses and returns the previously committed value (or `Value::empty()` if the key was absent). This avoids coordinating an extra `get` + `set` round trip just to discover what was deleted.
 
 **Implementation**: `MhinStoreFacade` wraps everything and manages the embedded remote server.
 
@@ -167,6 +170,8 @@ On persistence failure:
 ```
 
 **Empty blocks**: If `ops` is empty, only `current_block` advances. This supports sparse block heights.
+
+**Single-key deletes with return values**: `pop(block_height, key)` synthesizes a delete operation, runs through the same pipeline, and inspects the `BlockUndo` that `StateEngine` emits to return the previous value without issuing a separate `get`.
 
 ---
 

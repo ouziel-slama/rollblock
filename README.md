@@ -70,6 +70,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Operation { key: key_bob,   value: Value::from_slice(b"balance:600") },
     ])?;
 
+    // Remove Bob and capture the previous balance in one call
+    let removed = store.pop(3, key_bob)?;
+    println!("Removed Bob: {}", String::from_utf8_lossy(removed.as_slice()));
+
     // Oops! Roll back to block 1
     store.rollback(1)?;
 

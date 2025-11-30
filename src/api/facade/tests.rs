@@ -227,6 +227,10 @@ mod facade_tests {
             Ok(vec![Value::empty(); keys.len()])
         }
 
+        fn pop(&self, _block_height: BlockId, _key: Key) -> StoreResult<Value> {
+            Ok(Value::empty())
+        }
+
         fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
             None
         }
@@ -319,6 +323,10 @@ mod facade_tests {
 
         fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
             Ok(vec![Value::empty(); keys.len()])
+        }
+
+        fn pop(&self, _block_height: BlockId, _key: Key) -> StoreResult<Value> {
+            Ok(Value::empty())
         }
 
         fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
@@ -527,6 +535,22 @@ mod facade_tests {
         fn ensure_healthy(&self) -> StoreResult<()> {
             Ok(())
         }
+
+        fn pop(&self, block_height: BlockId, key: Key) -> StoreResult<Value> {
+            let previous = {
+                let mut state = self.state.lock().unwrap();
+                state.remove(&key).unwrap_or_else(Value::empty)
+            };
+            self.applied.lock().unwrap().push((
+                block_height,
+                vec![Operation {
+                    key,
+                    value: Value::empty(),
+                }],
+            ));
+            *self.current_block.lock().unwrap() = block_height;
+            Ok(previous)
+        }
     }
 
     impl BlockOrchestrator for FailingOrchestrator {
@@ -587,6 +611,13 @@ mod facade_tests {
             if guard.is_none() {
                 *guard = Some((block, reason));
             }
+        }
+
+        fn pop(&self, block_height: BlockId, _key: Key) -> StoreResult<Value> {
+            Err(MhinStoreError::BlockIdNotIncreasing {
+                block_height,
+                current: block_height,
+            })
         }
     }
 
@@ -1834,6 +1865,84 @@ mod facade_tests {
         assert_eq!(values, vec![42, 0]);
 
         block_facade.end_block().expect("block should finalize");
+    }
+
+    #[test]
+    fn pop_returns_previous_value_and_removes_key() -> StoreResult<()> {
+        let orchestrator = DummyOrchestrator::new();
+        let facade = MhinStoreFacade::from_orchestrator(orchestrator.clone());
+        let key = [0xAAu8; 8];
+
+        facade
+            .set(
+                1,
+                vec![Operation {
+                    key,
+                    value: 77.into(),
+                }],
+            )
+            .expect("set should succeed");
+
+        let removed = facade.pop(2, key)?;
+        assert_eq!(removed, 77);
+        assert_eq!(facade.get(key)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pop_on_missing_key_returns_empty_value() -> StoreResult<()> {
+        let orchestrator = DummyOrchestrator::new();
+        let facade = MhinStoreFacade::from_orchestrator(orchestrator);
+        let key = [0xBBu8; 8];
+
+        let removed = facade.pop(1, key)?;
+        assert_eq!(removed, Value::empty());
+        assert_eq!(facade.current_block()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn block_facade_pop_resolves_staged_state() -> StoreResult<()> {
+        let orchestrator = DummyOrchestrator::new();
+        orchestrator
+            .state
+            .lock()
+            .unwrap()
+            .insert([0x11u8; 8], 5.into());
+
+        let base = MhinStoreFacade::from_orchestrator(orchestrator);
+        let block_facade = MhinStoreBlockFacade::from_facade(base);
+        let key = [0x11u8; 8];
+
+        block_facade.start_block(2)?;
+        block_facade
+            .set(Operation {
+                key,
+                value: 9.into(),
+            })
+            .expect("staged set should succeed");
+
+        let removed = block_facade.pop(key)?;
+        assert_eq!(removed, 9);
+        assert_eq!(block_facade.get(key)?, 0);
+
+        block_facade.end_block()?;
+        assert_eq!(block_facade.inner().get(key)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn block_facade_store_pop_rejects_during_pending_block() {
+        let orchestrator = DummyOrchestrator::new();
+        let base = MhinStoreFacade::from_orchestrator(orchestrator);
+        let block_facade = MhinStoreBlockFacade::from_facade(base);
+
+        block_facade.start_block(5).unwrap();
+        let err = StoreFacade::pop(&block_facade, 6, [0u8; 8]).unwrap_err();
+        match err {
+            MhinStoreError::BlockInProgress { current } => assert_eq!(current, 5),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

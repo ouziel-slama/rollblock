@@ -20,6 +20,9 @@ fn main() -> rollblock::StoreResult<()> {
     let value = store.get(key)?;
     println!("Value: {}", value.to_u64().unwrap());
 
+    let removed = store.pop(2, key)?;
+    println!("Removed: {}", removed.to_u64().unwrap_or(0));
+
     store.rollback(0)?;
     assert!(store.get(key)?.is_delete());
 
@@ -56,8 +59,12 @@ fn main() -> rollblock::StoreResult<()> {
         Operation { key: key_b, value: Value::empty() }, // delete
     ])?;
 
-    // Read values
-    assert_eq!(store.get(key_a)?.to_u64(), Some(150));
+    // Block 3: remove key_a while returning its previous value
+    let previous = store.pop(3, key_a)?;
+    println!("key_a used to be {}", previous.to_u64().unwrap_or(0));
+
+    // Read values after the pop
+    assert!(store.get(key_a)?.is_delete());
     assert!(store.get(key_b)?.is_delete());
 
     // Batch read
@@ -100,12 +107,17 @@ fn main() -> rollblock::StoreResult<()> {
     // Read reflects staged value (not yet committed)
     assert_eq!(store.get(key)?.to_u64(), Some(42));
 
+    // Pop deletes the staged key and returns the buffered value
+    let staged = store.pop(key)?;
+    assert_eq!(staged.to_u64(), Some(42));
+    assert!(store.get(key)?.is_delete());
+
     // Commit the block
     store.end_block()?;
 
-    // Now committed
+    // Now committed (pop applied the delete)
     assert_eq!(store.current_block()?, 10);
-    assert_eq!(store.get(key)?.to_u64(), Some(42));
+    assert!(store.get(key)?.is_delete());
 
     // Rollback requires no block in progress
     store.rollback(0)?;

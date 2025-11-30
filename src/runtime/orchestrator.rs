@@ -29,6 +29,7 @@ pub trait BlockOrchestrator: Send + Sync {
     fn revert_to(&self, block: BlockId) -> StoreResult<()>;
     fn fetch(&self, key: Key) -> StoreResult<Value>;
     fn fetch_many(&self, keys: &[Key]) -> StoreResult<Vec<Value>>;
+    fn pop(&self, block_height: BlockId, key: Key) -> StoreResult<Value>;
     fn metrics(&self) -> Option<&StoreMetrics>;
     fn current_block(&self) -> StoreResult<BlockId>;
     fn applied_block_height(&self) -> BlockId;

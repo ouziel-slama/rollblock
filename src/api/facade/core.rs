@@ -398,6 +398,11 @@ impl MhinStoreFacade {
         self.orchestrator.durable_block_height()
     }
 
+    /// Removes a key at `block_height` and returns its previous value.
+    pub fn pop(&self, block_height: BlockId, key: Key) -> StoreResult<Value> {
+        self.orchestrator.pop(block_height, key)
+    }
+
     /// Returns true if relaxed durability semantics are currently active.
     pub fn relaxed_mode_enabled(&self) -> bool {
         self.durability_mode.read().is_relaxed()
@@ -586,6 +591,10 @@ impl StoreFacade for MhinStoreFacade {
 
     fn multi_get(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
         self.orchestrator.fetch_many(keys)
+    }
+
+    fn pop(&self, block_height: BlockId, key: Key) -> StoreResult<Value> {
+        self.orchestrator.pop(block_height, key)
     }
 
     fn enable_relaxed_mode(&self, sync_every_n_blocks: usize) -> StoreResult<()> {

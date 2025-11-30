@@ -235,6 +235,38 @@ where
         Ok(())
     }
 
+    fn apply_block(
+        &self,
+        block_height: BlockId,
+        ops: Vec<Operation>,
+        capture_key: Option<Key>,
+    ) -> StoreResult<Option<Value>> {
+        self.persistence.enforce_snapshot_freshness()?;
+        let start = Instant::now();
+        let guard = self.update_mutex.lock();
+
+        self.check_health()?;
+
+        tracing::debug!("Acquiring mutation mutex");
+        self.validate_block_height(block_height)?;
+        let reader_guard = self.reader_gate.write();
+
+        let metrics_context = ApplyMetricsContext::from_ops(start, &ops);
+        if ops.is_empty() {
+            self.apply_empty_block(block_height, metrics_context, guard, reader_guard)?;
+            return Ok(None);
+        }
+
+        self.apply_non_empty_block(
+            block_height,
+            ops,
+            metrics_context,
+            guard,
+            reader_guard,
+            capture_key,
+        )
+    }
+
     fn apply_empty_block(
         &self,
         block_height: BlockId,
@@ -341,13 +373,16 @@ where
         metrics_context: ApplyMetricsContext,
         guard: MutexGuard<'_, ()>,
         _reader_guard: RwLockWriteGuard<'_, ()>,
-    ) -> StoreResult<()> {
+        capture_key: Option<Key>,
+    ) -> StoreResult<Option<Value>> {
         let mut mutation_guard = Some(guard);
         tracing::debug!("Preparing journal");
         let delta = self.state_engine.prepare_journal(block_height, &ops)?;
         tracing::debug!("Journal prepared");
 
         let (stats, block_undo) = self.state_engine.commit(block_height, delta)?;
+        let captured_value =
+            capture_key.and_then(|target| Self::capture_previous_value(&block_undo, target));
         let block_undo = Arc::new(block_undo);
         tracing::debug!(
             operations = stats.operation_count,
@@ -373,12 +408,14 @@ where
         };
 
         if let Err(err) = persist_result {
-            return self.handle_persistence_error(
-                block_height,
-                block_undo,
-                err,
-                stats.operation_count,
-            );
+            return self
+                .handle_persistence_error(
+                    block_height,
+                    Arc::clone(&block_undo),
+                    err,
+                    stats.operation_count,
+                )
+                .map(|_| None);
         }
         drop(block_undo);
 
@@ -404,7 +441,16 @@ where
 
         self.persistence
             .update_key_count(self.state_engine.total_keys());
-        Ok(())
+        Ok(captured_value)
+    }
+
+    fn capture_previous_value(block_undo: &BlockUndo, target: Key) -> Option<Value> {
+        block_undo
+            .shard_undos
+            .iter()
+            .flat_map(|shard| shard.entries.iter())
+            .find(|entry| entry.key == target)
+            .map(|entry| entry.previous.clone().unwrap_or_else(Value::empty))
     }
 
     fn persist_synchronously(
@@ -630,22 +676,7 @@ where
 {
     #[tracing::instrument(skip(self, ops), fields(block_height, ops_count = ops.len()))]
     fn apply_operations(&self, block_height: BlockId, ops: Vec<Operation>) -> StoreResult<()> {
-        self.persistence.enforce_snapshot_freshness()?;
-        let start = Instant::now();
-        let guard = self.update_mutex.lock();
-
-        self.check_health()?;
-
-        tracing::debug!("Acquiring mutation mutex");
-        self.validate_block_height(block_height)?;
-        let reader_guard = self.reader_gate.write();
-
-        let metrics_context = ApplyMetricsContext::from_ops(start, &ops);
-        if ops.is_empty() {
-            return self.apply_empty_block(block_height, metrics_context, guard, reader_guard);
-        }
-
-        self.apply_non_empty_block(block_height, ops, metrics_context, guard, reader_guard)
+        self.apply_block(block_height, ops, None).map(|_| ())
     }
 
     #[tracing::instrument(skip(self), fields(target_block = block))]
@@ -689,6 +720,15 @@ where
         }
 
         self.lookup_batch(keys)
+    }
+
+    fn pop(&self, block_height: BlockId, key: Key) -> StoreResult<Value> {
+        let op = Operation {
+            key,
+            value: Value::empty(),
+        };
+        let captured = self.apply_block(block_height, vec![op], Some(key))?;
+        Ok(captured.unwrap_or_else(Value::empty))
     }
 
     fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {

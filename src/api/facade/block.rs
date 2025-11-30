@@ -100,6 +100,44 @@ impl MhinStoreBlockFacade {
         Ok(())
     }
 
+    /// Removes a key inside the staged block and returns its previous value.
+    pub fn pop(&self, key: Key) -> StoreResult<Value> {
+        self.inner.durable_block()?;
+
+        let mut pending = self.lock_pending()?;
+        let block_height = pending
+            .as_ref()
+            .ok_or(MhinStoreError::NoBlockInProgress)?
+            .block_height;
+
+        if let Some(value) = pending
+            .as_ref()
+            .and_then(|block| block.resolved_value(&key))
+        {
+            let staged = pending
+                .as_mut()
+                .expect("staged block present after resolved_value check");
+            staged.record_operation(Operation {
+                key,
+                value: Value::empty(),
+            });
+            return Ok(value);
+        }
+
+        let previous = self.inner.get(key)?;
+        let staged = pending.as_mut().ok_or(MhinStoreError::NoBlockInProgress)?;
+        if staged.block_height != block_height {
+            return Err(MhinStoreError::BlockInProgress {
+                current: staged.block_height,
+            });
+        }
+        staged.record_operation(Operation {
+            key,
+            value: Value::empty(),
+        });
+        Ok(previous)
+    }
+
     /// Commits the staged block through the underlying facade.
     pub fn end_block(&self) -> StoreResult<()> {
         let mut guard = self.lock_pending()?;
@@ -319,5 +357,18 @@ impl StoreFacade for MhinStoreBlockFacade {
 
     fn ensure_healthy(&self) -> StoreResult<()> {
         self.inner.ensure_healthy()
+    }
+
+    fn pop(&self, block_height: BlockId, key: Key) -> StoreResult<Value> {
+        let pending_block = {
+            let guard = self.lock_pending()?;
+            guard.as_ref().map(|block| block.block_height)
+        };
+
+        if let Some(pending) = pending_block {
+            return Err(MhinStoreError::BlockInProgress { current: pending });
+        }
+
+        self.inner.pop(block_height, key)
     }
 }

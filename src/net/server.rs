@@ -788,6 +788,15 @@ mod tests {
                 .collect())
         }
 
+        fn pop(&self, _block_height: BlockId, key: Key) -> StoreResult<Value> {
+            Ok(self
+                .values
+                .lock()
+                .unwrap()
+                .remove(&key)
+                .unwrap_or_else(Value::empty))
+        }
+
         fn metrics(&self) -> Option<&crate::metrics::StoreMetrics> {
             None
         }

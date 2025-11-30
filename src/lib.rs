@@ -37,7 +37,6 @@
 //!     },
 //! ];
 //! store.set(1, ops)?;
-//!
 //! // Read value
 //! let key = [1, 2, 3, 4, 5, 6, 7, 8];
 //! let value = store.get(key)?;
@@ -46,6 +45,10 @@
 //! } else {
 //!     println!("Value bytes: {:?}", value.as_slice());
 //! }
+//!
+//! // Atomically remove a key and get its previous value
+//! let removed = store.pop(2, key)?;
+//! println!("Removed bytes: {:?}", removed.as_slice());
 //!
 //! // Rollback
 //! store.rollback(0)?;
