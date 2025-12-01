@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::error::StoreResult;
 use crate::storage::journal::{BlockJournal, JournalPrunePlanOutcome, JournalPruneReport};
@@ -203,7 +203,7 @@ where
 
         if let Some(snapshot_block) = self.inner.metadata.load_snapshot_watermark()? {
             if snapshot_block < prune_target {
-                warn!(
+                info!(
                     snapshot_block,
                     unclamped_target = prune_target,
                     "pruner_clamped_by_snapshot"

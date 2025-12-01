@@ -1,5 +1,7 @@
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle as ThreadJoinHandle};
 
 use crate::block_journal::{FileBlockJournal, JournalOptions, SyncPolicy};
 use crate::error::{MhinStoreError, StoreResult};
@@ -12,9 +14,8 @@ use crate::state_shard::{RawTableShard, StateShard};
 use crate::store_lock::StoreLockGuard;
 use crate::types::{BlockId, Key, Operation, Value};
 use parking_lot::RwLock;
-use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime};
+use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 
 use super::config::{RemoteServerSettings, StoreConfig};
 use super::recovery::{
@@ -241,7 +242,7 @@ impl MhinStoreFacade {
                 "Using bootstrap block profile for pruning validation until history accumulates"
             );
         } else if !prune_diagnostics.window_satisfied {
-            tracing::warn!(
+            tracing::info!(
                 min_window = prune_diagnostics.min_window,
                 required_window = prune_diagnostics.required_window,
                 blocks_per_chunk = prune_diagnostics.blocks_per_chunk,
@@ -687,8 +688,7 @@ impl SharedStoreLock {
 }
 
 struct RemoteServerShared {
-    runtime: Mutex<Option<Runtime>>,
-    task: Mutex<Option<JoinHandle<Result<(), ServerError>>>>,
+    thread: Mutex<Option<ThreadJoinHandle<Result<(), ServerError>>>>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     metrics: RemoteServerHandle,
 }
@@ -708,23 +708,54 @@ impl RemoteServerController {
             .build()?;
 
         let server = RemoteStoreServer::new(store.clone(), settings.to_server_config())?;
-        let listener = runtime.block_on(server.bind_listener())?;
         let metrics = server.handle();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
-        let task = runtime.spawn(async move {
-            let shutdown = async move {
-                let _ = shutdown_rx.await;
+        let thread = thread::Builder::new()
+            .name("rollblock-remote-server".into())
+            .spawn(move || {
+                let shutdown = async move {
+                    let _ = shutdown_rx.await;
+                };
+
+                let listener = match runtime.block_on(server.bind_listener()) {
+                    Ok(listener) => {
+                        let _ = startup_tx.send(Ok(()));
+                        listener
+                    }
+                    Err(err) => {
+                        let _ = startup_tx.send(Err(()));
+                        return Err(err);
+                    }
+                };
+
+                runtime.block_on(async move {
+                    server
+                        .run_until_shutdown_with_listener(listener, shutdown)
+                        .await
+                })
+            })
+            .map_err(|err| MhinStoreError::RemoteServerTaskFailure {
+                reason: format!("failed to spawn remote server thread: {err}"),
+            })?;
+
+        if startup_rx.recv().map_err(|_| ()) != Ok(Ok(())) {
+            let err = match thread.join() {
+                Ok(Ok(())) => MhinStoreError::RemoteServerTaskFailure {
+                    reason: "remote server thread exited before reporting status".into(),
+                },
+                Ok(Err(server_err)) => MhinStoreError::from(server_err),
+                Err(panic) => MhinStoreError::RemoteServerTaskFailure {
+                    reason: describe_panic(panic),
+                },
             };
-            server
-                .run_until_shutdown_with_listener(listener, shutdown)
-                .await
-        });
+            return Err(err);
+        }
 
         Ok(Self {
             shared: Arc::new(RemoteServerShared {
-                runtime: Mutex::new(Some(runtime)),
-                task: Mutex::new(Some(task)),
+                thread: Mutex::new(Some(thread)),
                 shutdown_tx: Mutex::new(Some(shutdown_tx)),
                 metrics,
             }),
@@ -746,15 +777,12 @@ impl RemoteServerShared {
             let _ = tx.send(());
         }
 
-        let task = self.task.lock().unwrap().take();
-        let runtime = self.runtime.lock().unwrap().take();
-
-        if let (Some(runtime), Some(task)) = (runtime, task) {
-            match runtime.block_on(task) {
+        if let Some(thread) = self.thread.lock().unwrap().take() {
+            match thread.join() {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(err)) => Err(MhinStoreError::from(err)),
-                Err(join_err) => Err(MhinStoreError::RemoteServerTaskFailure {
-                    reason: join_err.to_string(),
+                Err(panic) => Err(MhinStoreError::RemoteServerTaskFailure {
+                    reason: describe_panic(panic),
                 }),
             }
         } else {
@@ -766,5 +794,15 @@ impl RemoteServerShared {
 impl Drop for RemoteServerShared {
     fn drop(&mut self) {
         let _ = self.shutdown();
+    }
+}
+
+fn describe_panic(payload: Box<dyn Any + Send + 'static>) -> String {
+    if let Some(msg) = payload.downcast_ref::<&str>() {
+        msg.to_string()
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "remote server thread panicked".into()
     }
 }

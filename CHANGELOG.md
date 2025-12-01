@@ -7,6 +7,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.3.1] - 2025-12-01
+
+### Fixed
+- Remote server start/shutdown now happens on a dedicated thread, avoiding nested `Runtime::block_on` panics when rollblock is embedded inside an existing Tokio runtime.
+
 ## [0.3.0] - 2025-11-28
 
 ### Added
