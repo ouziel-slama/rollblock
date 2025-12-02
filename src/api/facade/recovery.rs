@@ -235,7 +235,7 @@ where
     };
 
     if entries.is_empty() {
-        tracing::warn!(
+        tracing::info!(
             current_block,
             "Journal index empty during startup; attempting recovery"
         );

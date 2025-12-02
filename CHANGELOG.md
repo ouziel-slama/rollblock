@@ -7,6 +7,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.3.2] - 2025-12-02
+
+- Allow brand-new stores to ingest block height `0` once, relaxing the
+  orchestrator guard so genesis chains no longer have to start at `1`.
+
 ## [0.3.1] - 2025-12-01
 
 ### Fixed

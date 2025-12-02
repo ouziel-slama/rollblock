@@ -560,6 +560,56 @@ fn block_height_must_be_increasing() {
 }
 
 #[test]
+fn allows_genesis_block_zero_once() {
+    let tmp = tempdir();
+    let journal_path = tmp.path().join("journal");
+
+    let metadata = Arc::new(MemoryMetadataStore::new());
+    let journal = Arc::new(FileBlockJournal::new(&journal_path).unwrap());
+    let snapshotter = Arc::new(NoopSnapshotter);
+
+    let shards: Vec<Arc<dyn StateShard>> = (0..2)
+        .map(|index| Arc::new(RawTableShard::new(index, 32)) as Arc<dyn StateShard>)
+        .collect();
+
+    let engine = Arc::new(ShardedStateEngine::new(shards, Arc::clone(&metadata)));
+
+    let orchestrator = DefaultBlockOrchestrator::new(
+        engine,
+        journal,
+        snapshotter,
+        Arc::clone(&metadata),
+        synchronous_settings(),
+    )
+    .unwrap();
+
+    let key = [7u8; 8];
+    orchestrator
+        .apply_operations(0, vec![operation(key, 99)])
+        .expect("genesis block 0 should be accepted");
+    assert_eq!(orchestrator.fetch(key).unwrap(), 99);
+    assert_eq!(
+        metadata.current_block().unwrap(),
+        0,
+        "metadata should record the genesis block"
+    );
+
+    let second_zero = orchestrator.apply_operations(0, vec![operation(key, 42)]);
+    assert!(
+        matches!(
+            second_zero,
+            Err(MhinStoreError::BlockIdNotIncreasing { .. })
+        ),
+        "block 0 should only be accepted once"
+    );
+
+    orchestrator
+        .apply_operations(1, vec![operation(key, 100)])
+        .unwrap();
+    assert_eq!(metadata.current_block().unwrap(), 1);
+}
+
+#[test]
 fn empty_value_sets_delete_keys() {
     let tmp = tempdir();
     let journal_path = tmp.path().join("journal");

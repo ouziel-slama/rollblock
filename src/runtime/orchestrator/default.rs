@@ -163,7 +163,11 @@ where
         let current_applied = self.persistence.applied_block_height();
         let current = current_applied.max(current_durable);
 
-        if block_height <= current {
+        let allow_genesis_zero = block_height == 0
+            && current == 0
+            && self.metadata.last_journal_offset_at_or_before(0)?.is_none();
+
+        if block_height <= current && !allow_genesis_zero {
             self.persistence.metrics().record_failure();
             return Err(MhinStoreError::BlockIdNotIncreasing {
                 block_height,

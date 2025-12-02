@@ -25,11 +25,13 @@ pub trait StoreFacade: Send + Sync {
     /// # Arguments
     ///
     /// * `block_height` - Must be strictly greater than the current block height
+    ///   (the genesis block `0` is allowed when initializing a brand-new store)
     /// * `operations` - Vector of set operations (`value.is_delete()` removes the key)
     ///
     /// # Errors
     ///
-    /// Returns `BlockIdNotIncreasing` if `block_height <= current_block` (when auto-rollback is disabled)
+    /// Returns `BlockIdNotIncreasing` if `block_height <= current_block`
+    /// (unless applying the genesis block to an empty store)
     ///
     /// # Examples
     ///
