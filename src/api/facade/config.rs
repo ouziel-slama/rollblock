@@ -694,7 +694,8 @@ fn div_ceil(num: u64, denom: u64) -> BlockId {
         return BlockId::MAX;
     }
     let quotient = num / denom;
-    if num.is_multiple_of(denom) {
+    #[allow(clippy::manual_is_multiple_of)]
+    if num % denom == 0 {
         quotient
     } else {
         quotient.saturating_add(1)

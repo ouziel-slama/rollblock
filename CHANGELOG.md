@@ -7,6 +7,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.3.4] - 2025-12-06
+
+### Fixed
+- Replaced unstable `is_multiple_of` method with stable modulo operation to ensure compatibility with stable Rust.
+
 ## [0.3.3] - 2025-12-06
 
 ### Changed
