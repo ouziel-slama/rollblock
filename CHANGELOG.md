@@ -7,6 +7,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.3.3] - 2025-12-06
+
+### Changed
+- Forced snapshot log message downgraded from `warn` to `info` since this is expected behavior when using `max_snapshot_interval`.
+
 ## [0.3.2] - 2025-12-02
 
 - Allow brand-new stores to ingest block height `0` once, relaxing the
