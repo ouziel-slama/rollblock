@@ -677,7 +677,7 @@ where
             return Ok(());
         }
 
-        tracing::warn!(
+        tracing::info!(
             elapsed_secs = self.last_snapshot.lock().elapsed().as_secs(),
             max_secs = self.max_snapshot_interval.as_secs(),
             "Forcing snapshot because maximum snapshot interval was exceeded"
