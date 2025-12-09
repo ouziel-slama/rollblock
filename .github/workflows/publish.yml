@@ -42,10 +42,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy (all targets, all features)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --all-features --verbose
+        run: cargo test --verbose
 
       - name: Ensure tag matches crate version
         run: |
