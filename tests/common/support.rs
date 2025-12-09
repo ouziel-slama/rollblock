@@ -15,7 +15,7 @@ use rollblock::error::{MhinStoreError, StoreResult};
 use rollblock::metadata::{GcWatermark, MetadataStore};
 use rollblock::snapshot::Snapshotter;
 use rollblock::state_shard::StateShard;
-use rollblock::types::{BlockId, BlockUndo, JournalMeta, Key, Operation, Value};
+use rollblock::types::{BlockId, BlockUndo, JournalMeta, Operation, StoreKey as Key, Value};
 use rollblock::FileBlockJournal;
 static INIT_TESTDATA_ROOT: Once = Once::new();
 use tempfile::{tempdir_in, TempDir};
@@ -404,11 +404,15 @@ impl BlockJournal for SlowJournal {
     }
 }
 
-pub fn operation<V: Into<Value>>(key: Key, value: V) -> Operation {
+pub fn operation<V: Into<Value>>(key: impl Into<Key>, value: V) -> Operation {
     Operation {
-        key,
+        key: key.into(),
         value: value.into(),
     }
+}
+
+pub fn padded_key(prefix: [u8; 8]) -> Key {
+    Key::from_prefix(prefix)
 }
 
 pub fn wait_for_block(metadata: &Arc<MemoryMetadataStore>, target: BlockId) {
@@ -475,7 +479,7 @@ mod tests {
 
         // First append must sync to ensure a brand-new journal is durable before batching kicks in.
         let first_outcome = journal
-            .append(1, &empty_undo(1), &[operation([1u8; 8], 10)])
+            .append(1, &empty_undo(1), &[operation([1u8; Key::BYTES], 10)])
             .expect("first append should succeed");
         assert!(
             first_outcome.synced,
@@ -487,7 +491,7 @@ mod tests {
                 .append(
                     block,
                     &empty_undo(block),
-                    &[operation([block as u8; 8], block * 10)],
+                    &[operation([block as u8; Key::BYTES], block * 10)],
                 )
                 .expect("append should succeed");
             assert!(
@@ -497,7 +501,7 @@ mod tests {
         }
 
         let outcome = journal
-            .append(3, &empty_undo(3), &[operation([3u8; 8], 30)])
+            .append(3, &empty_undo(3), &[operation(padded_key([3u8; 8]), 30)])
             .expect("append should succeed at threshold");
         assert!(
             outcome.synced,
@@ -506,13 +510,13 @@ mod tests {
 
         journal.set_sync_policy(SyncPolicy::EveryBlock);
         let outcome = journal
-            .append(4, &empty_undo(4), &[operation([4u8; 8], 40)])
+            .append(4, &empty_undo(4), &[operation(padded_key([4u8; 8]), 40)])
             .expect("append should sync every block");
         assert!(outcome.synced, "every block policy must sync every append");
 
         journal.set_sync_policy(SyncPolicy::every_n_blocks(5));
         let outcome = journal
-            .append(5, &empty_undo(5), &[operation([5u8; 8], 50)])
+            .append(5, &empty_undo(5), &[operation(padded_key([5u8; 8]), 50)])
             .expect("append should succeed under relaxed mode");
         assert!(
             !outcome.synced,
@@ -521,7 +525,7 @@ mod tests {
 
         journal.force_sync().expect("force_sync should succeed");
         let outcome = journal
-            .append(6, &empty_undo(6), &[operation([6u8; 8], 60)])
+            .append(6, &empty_undo(6), &[operation(padded_key([6u8; 8]), 60)])
             .expect("append after force_sync should succeed");
         assert!(
             outcome.synced,

@@ -5,8 +5,12 @@
 //!
 //! Run with: cargo run --example blockchain_reorg
 
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+
+fn acct(id: u8) -> Key {
+    Key::from_prefix([id, 0, 0, 0, 0, 0, 0, 0])
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔗 Blockchain Reorganization Example\n");
@@ -29,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Block 100: Genesis transaction
     println!("  Block 100: Alice receives 1000 coins");
-    let alice = [1, 0, 0, 0, 0, 0, 0, 0];
+    let alice = acct(1);
     store.set(
         100,
         vec![Operation {
@@ -40,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Block 101: Alice sends 200 to Bob
     println!("  Block 101: Alice sends 200 to Bob");
-    let bob = [2, 0, 0, 0, 0, 0, 0, 0];
+    let bob = acct(2);
     store.set(
         101,
         vec![
@@ -57,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Block 102: Bob sends 50 to Charlie
     println!("  Block 102: Bob sends 50 to Charlie");
-    let charlie = [3, 0, 0, 0, 0, 0, 0, 0];
+    let charlie = acct(3);
     store.set(
         102,
         vec![
@@ -88,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ✓ Rollback completed\n");
 
     println!("  Block 101 (new): Alice sends 300 to David instead");
-    let david = [4, 0, 0, 0, 0, 0, 0, 0];
+    let david = acct(4);
     store.set(
         101,
         vec![
@@ -114,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Continue building on the new chain
     println!("\n  Block 102 (new): David sends 100 to Eve");
-    let eve = [5, 0, 0, 0, 0, 0, 0, 0];
+    let eve = acct(5);
     store.set(
         102,
         vec![

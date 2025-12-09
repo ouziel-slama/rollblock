@@ -84,10 +84,8 @@ mod tests {
     use super::*;
     use crate::error::MhinStoreError;
     use crate::state_shard::RawTableShard;
-    use crate::types::{Key, Value, ValueBuf, MAX_VALUE_BYTES};
-    use format::{
-        checksum_to_u64, SNAPSHOT_HEADER_RESERVED, SNAPSHOT_HEADER_SIZE_V2, SNAPSHOT_VERSION,
-    };
+    use crate::types::{StoreKey as Key, Value, ValueBuf, MAX_VALUE_BYTES};
+    use format::{checksum_to_u64, SNAPSHOT_HEADER_SIZE, SNAPSHOT_VERSION};
     use memmap2::Mmap;
     use std::env;
     use std::fs::{self, File, OpenOptions};
@@ -100,6 +98,10 @@ mod tests {
 
     fn opt_value(buf: Option<ValueBuf>) -> Option<Value> {
         buf.map(Value::from)
+    }
+
+    fn padded_key(prefix: [u8; 8]) -> Key {
+        Key::from_prefix(prefix)
     }
 
     #[test]
@@ -134,9 +136,9 @@ mod tests {
         let shards: Vec<Arc<dyn StateShard>> = vec![Arc::new(RawTableShard::new(0, 8))];
 
         let expected_entries: Vec<(Key, Vec<u8>)> = vec![
-            ([0u8; 8], vec![1, 2, 3, 4, 5, 6, 7]),
-            ([1u8; 8], vec![0xAA; 32]),
-            ([2u8; 8], vec![0x55; MAX_VALUE_BYTES]),
+            ([0u8; Key::BYTES].into(), vec![1, 2, 3, 4, 5, 6, 7]),
+            ([1u8; Key::BYTES].into(), vec![0xAA; 32]),
+            ([2u8; Key::BYTES].into(), vec![0x55; MAX_VALUE_BYTES]),
         ];
 
         shards[0].import_data(
@@ -178,7 +180,7 @@ mod tests {
             .map(|i| Arc::new(RawTableShard::new(i, 8)) as Arc<dyn StateShard>)
             .collect();
 
-        let key = [7u8; 8];
+        let key = [7u8; Key::BYTES].into();
         shards[0].import_data(vec![(key, buf(77))]);
 
         let block_height = 55;
@@ -213,6 +215,49 @@ mod tests {
     }
 
     #[test]
+    fn load_snapshot_rejects_key_width_mismatch() {
+        let workspace_tmp = env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+
+        let snapshotter = MmapSnapshotter::new(tmp.path()).unwrap();
+        let shards: Vec<Arc<dyn StateShard>> = vec![Arc::new(RawTableShard::new(0, 4))];
+
+        // Write a valid snapshot with the configured key width.
+        let snapshot_path = snapshotter
+            .create_snapshot(9, &shards)
+            .expect("snapshot creation succeeds");
+
+        // Corrupt the stored key width to simulate a build-time mismatch.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&snapshot_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(6)).unwrap();
+        let mismatched = u16::try_from(Key::BYTES + 1).unwrap();
+        file.write_all(&mismatched.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let err = snapshotter
+            .load_snapshot(&snapshot_path, &shards)
+            .expect_err("should reject mismatched key width");
+
+        match err {
+            MhinStoreError::ConfigurationMismatch {
+                field,
+                stored,
+                requested,
+            } => {
+                assert_eq!(field, "key_bytes");
+                assert_eq!(stored, Key::BYTES + 1);
+                assert_eq!(requested, Key::BYTES);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn create_and_load_snapshot_with_data() {
         let workspace_tmp = env::current_dir().unwrap().join("target/testdata");
         std::fs::create_dir_all(&workspace_tmp).unwrap();
@@ -226,14 +271,14 @@ mod tests {
 
         let test_data = [
             vec![
-                ([1, 0, 0, 0, 0, 0, 0, 0], buf(100)),
-                ([2, 0, 0, 0, 0, 0, 0, 0], buf(200)),
+                (padded_key([1, 0, 0, 0, 0, 0, 0, 0]), buf(100)),
+                (padded_key([2, 0, 0, 0, 0, 0, 0, 0]), buf(200)),
             ],
-            vec![([3, 0, 0, 0, 0, 0, 0, 0], buf(300))],
+            vec![(padded_key([3, 0, 0, 0, 0, 0, 0, 0]), buf(300))],
             vec![],
             vec![
-                ([4, 0, 0, 0, 0, 0, 0, 0], buf(400)),
-                ([5, 0, 0, 0, 0, 0, 0, 0], buf(500)),
+                (padded_key([4, 0, 0, 0, 0, 0, 0, 0]), buf(400)),
+                (padded_key([5, 0, 0, 0, 0, 0, 0, 0]), buf(500)),
             ],
         ];
 
@@ -242,15 +287,15 @@ mod tests {
         }
 
         assert_eq!(
-            opt_value(shards[0].get(&[1, 0, 0, 0, 0, 0, 0, 0])),
+            opt_value(shards[0].get(&padded_key([1, 0, 0, 0, 0, 0, 0, 0]))),
             Some(100.into())
         );
         assert_eq!(
-            opt_value(shards[1].get(&[3, 0, 0, 0, 0, 0, 0, 0])),
+            opt_value(shards[1].get(&padded_key([3, 0, 0, 0, 0, 0, 0, 0]))),
             Some(300.into())
         );
         assert_eq!(
-            opt_value(shards[3].get(&[5, 0, 0, 0, 0, 0, 0, 0])),
+            opt_value(shards[3].get(&padded_key([5, 0, 0, 0, 0, 0, 0, 0]))),
             Some(500.into())
         );
 
@@ -265,23 +310,23 @@ mod tests {
         assert_eq!(loaded_block, block_height);
 
         assert_eq!(
-            opt_value(shards[0].get(&[1, 0, 0, 0, 0, 0, 0, 0])),
+            opt_value(shards[0].get(&padded_key([1, 0, 0, 0, 0, 0, 0, 0]))),
             Some(100.into())
         );
         assert_eq!(
-            opt_value(shards[0].get(&[2, 0, 0, 0, 0, 0, 0, 0])),
+            opt_value(shards[0].get(&padded_key([2, 0, 0, 0, 0, 0, 0, 0]))),
             Some(200.into())
         );
         assert_eq!(
-            opt_value(shards[1].get(&[3, 0, 0, 0, 0, 0, 0, 0])),
+            opt_value(shards[1].get(&padded_key([3, 0, 0, 0, 0, 0, 0, 0]))),
             Some(300.into())
         );
         assert_eq!(
-            opt_value(shards[3].get(&[4, 0, 0, 0, 0, 0, 0, 0])),
+            opt_value(shards[3].get(&padded_key([4, 0, 0, 0, 0, 0, 0, 0]))),
             Some(400.into())
         );
         assert_eq!(
-            opt_value(shards[3].get(&[5, 0, 0, 0, 0, 0, 0, 0])),
+            opt_value(shards[3].get(&padded_key([5, 0, 0, 0, 0, 0, 0, 0]))),
             Some(500.into())
         );
     }
@@ -297,7 +342,7 @@ mod tests {
             .map(|i| Arc::new(RawTableShard::new(i, 8)) as Arc<dyn StateShard>)
             .collect();
 
-        let key = [1u8; 8];
+        let key = [1u8; Key::BYTES].into();
         shards[0].import_data(vec![(key, buf(42))]);
 
         let block_height = 7;
@@ -381,8 +426,8 @@ mod tests {
         let version = u16::from_le_bytes([mmap[4], mmap[5]]);
         assert_eq!(version, SNAPSHOT_VERSION);
 
-        let reserved = u16::from_le_bytes([mmap[6], mmap[7]]);
-        assert_eq!(reserved, SNAPSHOT_HEADER_RESERVED);
+        let stored_key_bytes = u16::from_le_bytes([mmap[6], mmap[7]]);
+        assert_eq!(stored_key_bytes as usize, Key::BYTES);
 
         let stored_block = u64::from_le_bytes([
             mmap[8], mmap[9], mmap[10], mmap[11], mmap[12], mmap[13], mmap[14], mmap[15],
@@ -397,7 +442,7 @@ mod tests {
         let stored_checksum = u64::from_le_bytes([
             mmap[24], mmap[25], mmap[26], mmap[27], mmap[28], mmap[29], mmap[30], mmap[31],
         ]);
-        let expected_checksum = checksum_to_u64(blake3::hash(&mmap[SNAPSHOT_HEADER_SIZE_V2..]));
+        let expected_checksum = checksum_to_u64(blake3::hash(&mmap[SNAPSHOT_HEADER_SIZE..]));
         assert_eq!(stored_checksum, expected_checksum);
     }
 

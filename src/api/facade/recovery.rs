@@ -4,7 +4,7 @@ use crate::block_journal::BlockJournal;
 use crate::error::{MhinStoreError, StoreResult};
 use crate::metadata::{LmdbMetadataStore, MetadataStore, ShardLayout};
 use crate::snapshot::{MmapSnapshotter, Snapshotter};
-use crate::state_engine::ShardedStateEngine;
+use crate::state_engine::{ShardedStateEngine, SHARD_HASH_VERSION};
 use crate::state_shard::StateShard;
 use crate::types::BlockId;
 
@@ -385,6 +385,39 @@ pub(crate) fn resolve_shard_layout(
             }
         }
 
+        if stored.key_bytes != crate::types::StoreKey::BYTES {
+            return Err(MhinStoreError::ConfigurationMismatch {
+                field: "key_bytes",
+                stored: stored.key_bytes,
+                requested: crate::types::StoreKey::BYTES,
+            });
+        }
+
+        let stored_hash_version = stored.hash_version.ok_or_else(|| {
+            tracing::error!(
+                current_hash_version = SHARD_HASH_VERSION,
+                "Stored shard layout missing hash version; refusing to continue"
+            );
+            MhinStoreError::ConfigurationMismatch {
+                field: "shard_hash_version",
+                stored: 0,
+                requested: SHARD_HASH_VERSION as usize,
+            }
+        })?;
+
+        if stored_hash_version != SHARD_HASH_VERSION {
+            tracing::error!(
+                stored_hash_version,
+                current_hash_version = SHARD_HASH_VERSION,
+                "Shard hash version mismatch"
+            );
+            return Err(MhinStoreError::ConfigurationMismatch {
+                field: "shard_hash_version",
+                stored: stored_hash_version as usize,
+                requested: SHARD_HASH_VERSION as usize,
+            });
+        }
+
         return Ok(stored);
     }
 
@@ -419,6 +452,8 @@ pub(crate) fn resolve_shard_layout(
     let layout = ShardLayout {
         shards_count,
         initial_capacity,
+        key_bytes: crate::types::StoreKey::BYTES,
+        hash_version: Some(SHARD_HASH_VERSION),
     };
 
     if allow_persist {
@@ -426,4 +461,146 @@ pub(crate) fn resolve_shard_layout(
     }
 
     Ok(layout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir_in;
+
+    fn workspace_tmp() -> std::path::PathBuf {
+        let path = std::env::current_dir().unwrap().join("target/testdata");
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn resolve_shard_layout_rejects_hash_version_mismatch() {
+        let tmp = tempdir_in(workspace_tmp()).unwrap();
+        let metadata = LmdbMetadataStore::new(tmp.path()).unwrap();
+        let layout = ShardLayout {
+            shards_count: 2,
+            initial_capacity: 16,
+            key_bytes: crate::types::StoreKey::BYTES,
+            hash_version: Some(SHARD_HASH_VERSION + 1),
+        };
+        metadata.store_shard_layout(&layout).unwrap();
+
+        let config = StoreConfig::existing(tmp.path());
+        let err = resolve_shard_layout(&metadata, &config, false).unwrap_err();
+
+        match err {
+            MhinStoreError::ConfigurationMismatch {
+                field,
+                stored,
+                requested,
+            } => {
+                assert_eq!(field, "shard_hash_version");
+                assert_eq!(stored, (SHARD_HASH_VERSION + 1) as usize);
+                assert_eq!(requested, SHARD_HASH_VERSION as usize);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_shard_layout_rejects_missing_hash_version() {
+        let tmp = tempdir_in(workspace_tmp()).unwrap();
+        let metadata = LmdbMetadataStore::new(tmp.path()).unwrap();
+        let layout = ShardLayout {
+            shards_count: 4,
+            initial_capacity: 32,
+            key_bytes: crate::types::StoreKey::BYTES,
+            hash_version: None,
+        };
+        metadata.store_shard_layout(&layout).unwrap();
+
+        let config = StoreConfig::existing(tmp.path());
+        let err = resolve_shard_layout(&metadata, &config, true).unwrap_err();
+
+        match err {
+            MhinStoreError::ConfigurationMismatch {
+                field,
+                stored,
+                requested,
+            } => {
+                assert_eq!(field, "shard_hash_version");
+                assert_eq!(stored, 0);
+                assert_eq!(requested, SHARD_HASH_VERSION as usize);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let stored = metadata.load_shard_layout().unwrap().unwrap();
+        assert_eq!(stored.hash_version, None);
+        assert_eq!(stored.shards_count, layout.shards_count);
+        assert_eq!(stored.initial_capacity, layout.initial_capacity);
+        assert_eq!(stored.key_bytes, crate::types::StoreKey::BYTES);
+    }
+
+    #[test]
+    fn resolve_shard_layout_rejects_older_hash_version() {
+        let tmp = tempdir_in(workspace_tmp()).unwrap();
+        let metadata = LmdbMetadataStore::new(tmp.path()).unwrap();
+        let stored_version = SHARD_HASH_VERSION
+            .checked_sub(1)
+            .unwrap_or(SHARD_HASH_VERSION + 1);
+        let layout = ShardLayout {
+            shards_count: 3,
+            initial_capacity: 24,
+            key_bytes: crate::types::StoreKey::BYTES,
+            hash_version: Some(stored_version),
+        };
+        metadata.store_shard_layout(&layout).unwrap();
+
+        let config = StoreConfig::existing(tmp.path());
+        let err = resolve_shard_layout(&metadata, &config, false).unwrap_err();
+
+        match err {
+            MhinStoreError::ConfigurationMismatch {
+                field,
+                stored,
+                requested,
+            } => {
+                assert_eq!(field, "shard_hash_version");
+                assert_eq!(stored, stored_version as usize);
+                assert_eq!(requested, SHARD_HASH_VERSION as usize);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_shard_layout_rejects_key_bytes_mismatch() {
+        let tmp = tempdir_in(workspace_tmp()).unwrap();
+        let metadata = LmdbMetadataStore::new(tmp.path()).unwrap();
+
+        // Simulate a layout stored with a different key width (e.g. data from
+        // a build compiled with a different ROLLBLOCK_KEY_BYTES).
+        let mismatched_key_bytes = crate::types::StoreKey::BYTES + 8;
+        let layout = ShardLayout {
+            shards_count: 4,
+            initial_capacity: 32,
+            key_bytes: mismatched_key_bytes,
+            hash_version: Some(SHARD_HASH_VERSION),
+        };
+        metadata.store_shard_layout(&layout).unwrap();
+
+        let config = StoreConfig::existing(tmp.path());
+        let err = resolve_shard_layout(&metadata, &config, false).unwrap_err();
+
+        match err {
+            MhinStoreError::ConfigurationMismatch {
+                field,
+                stored,
+                requested,
+            } => {
+                assert_eq!(field, "key_bytes");
+                assert_eq!(stored, mismatched_key_bytes);
+                assert_eq!(requested, crate::types::StoreKey::BYTES);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

@@ -13,6 +13,8 @@ pub use lmdb::LmdbMetadataStore;
 pub struct ShardLayout {
     pub shards_count: usize,
     pub initial_capacity: usize,
+    pub key_bytes: usize,
+    pub hash_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -1,18 +1,207 @@
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use serde::de::{self, Deserializer};
-use serde::ser::Serializer;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::api::error::MhinStoreError;
 
-/// Fixed-size 8-byte key used throughout the store.
+// Key width constants included from build-time generated files.
+// These are `pub const` in the included files, so they're automatically
+// exported and accessible via `rollblock::types::{MIN_KEY_BYTES, MAX_KEY_BYTES, DEFAULT_KEY_BYTES}`.
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/build/key_limits.rs"));
+include!(concat!(env!("OUT_DIR"), "/key_width.rs"));
+
+/// Fixed-size key used throughout the store (const-generic over the width).
 ///
-/// Keys are typically derived from hashing larger identifiers.
-pub type Key = [u8; 8];
+/// Keys are typically derived from hashing larger identifiers upstream.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Key<const N: usize>(pub [u8; N]);
+
+/// Default key type bound to [`DEFAULT_KEY_BYTES`].
+pub type StoreKey = Key<DEFAULT_KEY_BYTES>;
+
+impl<const N: usize> Key<N> {
+    pub const BYTES: usize = N;
+
+    #[inline]
+    pub const fn new(bytes: [u8; N]) -> Self {
+        Self(bytes)
+    }
+
+    #[inline]
+    pub const fn into_inner(self) -> [u8; N] {
+        self.0
+    }
+
+    #[inline]
+    pub const fn as_array(&self) -> &[u8; N] {
+        &self.0
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Build a key from a prefix, padding with zeros when the configured key
+    /// width is larger than the prefix length.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the prefix is longer than the configured key width to avoid
+    /// silent truncation.
+    #[inline]
+    pub fn from_prefix<const M: usize>(prefix: [u8; M]) -> Self {
+        assert!(
+            prefix.len() <= N,
+            "prefix length {} exceeds key width {}",
+            prefix.len(),
+            N
+        );
+
+        let mut bytes = [0u8; N];
+        bytes[..prefix.len()].copy_from_slice(&prefix);
+        Key(bytes)
+    }
+
+    /// Build a key from a little-endian `u64`, padding or truncating to the
+    /// configured key width.
+    #[inline]
+    pub fn from_u64_le(value: u64) -> Self {
+        Self::from_prefix(value.to_le_bytes())
+    }
+}
+
+impl<const N: usize> From<[u8; N]> for Key<N> {
+    fn from(value: [u8; N]) -> Self {
+        Key(value)
+    }
+}
+
+impl StoreKey {
+    /// Fallible constructor that enforces the configured key width.
+    ///
+    /// Returns an error if the input slice length does not match
+    /// `DEFAULT_KEY_BYTES`, preventing accidental truncation when the store
+    /// is compiled with a larger key width.
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, MhinStoreError> {
+        if bytes.len() != DEFAULT_KEY_BYTES {
+            return Err(MhinStoreError::ConfigurationMismatch {
+                field: "key_bytes",
+                stored: bytes.len(),
+                requested: DEFAULT_KEY_BYTES,
+            });
+        }
+
+        let mut buf = [0u8; DEFAULT_KEY_BYTES];
+        buf.copy_from_slice(bytes);
+        Ok(Key(buf))
+    }
+}
+
+impl<const N: usize> From<Key<N>> for [u8; N] {
+    fn from(key: Key<N>) -> Self {
+        key.0
+    }
+}
+
+impl<const N: usize> Deref for Key<N> {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<const N: usize> AsRef<[u8]> for Key<N> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl<const N: usize> Borrow<[u8]> for Key<N> {
+    #[inline]
+    fn borrow(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl<const N: usize> fmt::Debug for Key<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Key").field(&self.as_slice()).finish()
+    }
+}
+
+impl<const N: usize> Default for Key<N> {
+    fn default() -> Self {
+        Self([0u8; N])
+    }
+}
+
+impl<const N: usize> Serialize for Key<N> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeTuple;
+        // Serialize as a fixed-width tuple to avoid length prefixes in binary formats.
+        // This matches the deserialize_tuple call in Deserialize impl.
+        let mut tuple = serializer.serialize_tuple(N)?;
+        for byte in &self.0 {
+            tuple.serialize_element(byte)?;
+        }
+        tuple.end()
+    }
+}
+
+impl<'de, const N: usize> Deserialize<'de> for Key<N> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct KeyVisitor<const N: usize>;
+
+        impl<'de, const N: usize> de::Visitor<'de> for KeyVisitor<N> {
+            type Value = Key<N>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "a byte array of length {}", N)
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v.len() != N {
+                    return Err(E::invalid_length(v.len(), &self));
+                }
+                let mut bytes = [0u8; N];
+                bytes.copy_from_slice(v);
+                Ok(Key(bytes))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut bytes = [0u8; N];
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    *byte = seq
+                        .next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(i, &self))?;
+                }
+                Ok(Key(bytes))
+            }
+        }
+
+        deserializer.deserialize_tuple(N, KeyVisitor)
+    }
+}
 
 /// Maximum number of bytes allowed per value payload.
 pub const MAX_VALUE_BYTES: usize = 65_535;
@@ -377,6 +566,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn key_supports_default_width() {
+        let key: StoreKey = Key::from([1u8; DEFAULT_KEY_BYTES]);
+        assert_eq!(key.as_slice(), &[1u8; DEFAULT_KEY_BYTES]);
+    }
+
+    #[test]
+    fn key_supports_max_width() {
+        let key: Key<MAX_KEY_BYTES> = Key::from([7u8; MAX_KEY_BYTES]);
+        assert_eq!(key.as_slice().len(), MAX_KEY_BYTES);
+        assert_eq!(key.as_array(), &[7u8; MAX_KEY_BYTES]);
+    }
+
+    #[test]
+    fn key_supports_larger_widths() {
+        let key: Key<16> = Key::from([9u8; 16]);
+        assert_eq!(key.as_slice().len(), 16);
+        assert_eq!(key.as_array(), &[9u8; 16]);
+    }
+
+    #[test]
+    fn key_bincode_roundtrip_default_width() {
+        let original = StoreKey::from([0xABu8; DEFAULT_KEY_BYTES]);
+        let encoded = bincode::serialize(&original).unwrap();
+        let decoded: StoreKey = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn key_bincode_roundtrip_larger_width() {
+        let original = Key::<16>::from([0xCDu8; 16]);
+        let encoded = bincode::serialize(&original).unwrap();
+        let decoded: Key<16> = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn key_bincode_rejects_wrong_length() {
+        let short_bytes = vec![1u8; 4]; // Too short for an 8-byte key
+        let err = bincode::deserialize::<StoreKey>(&short_bytes);
+        assert!(err.is_err(), "should reject undersized payload");
+    }
+
+    #[test]
+    fn key_try_from_slice_rejects_mismatched_length() {
+        let too_short = [0u8; MIN_KEY_BYTES - 1];
+        let err = StoreKey::try_from_slice(&too_short).unwrap_err();
+        match err {
+            MhinStoreError::ConfigurationMismatch {
+                field,
+                stored,
+                requested,
+            } => {
+                assert_eq!(field, "key_bytes");
+                assert_eq!(stored, MIN_KEY_BYTES - 1);
+                assert_eq!(requested, DEFAULT_KEY_BYTES);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_try_from_slice_accepts_exact_width() {
+        let bytes = [0xEEu8; DEFAULT_KEY_BYTES];
+        let key = StoreKey::try_from_slice(&bytes).expect("valid width");
+        assert_eq!(key.as_slice(), bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "prefix length")]
+    fn key_from_prefix_rejects_overlong_prefix() {
+        let _ = StoreKey::from_prefix([0xAAu8; DEFAULT_KEY_BYTES + 1]);
+    }
+
+    #[test]
     fn try_from_vec_rejects_oversized_payloads() {
         let oversized = vec![0u8; MAX_VALUE_BYTES + 1];
         let err = Value::try_from_vec(oversized).unwrap_err();
@@ -535,18 +798,26 @@ impl AsRef<[u8]> for ValueBuf {
 /// Block heights must be monotonically increasing.
 pub type BlockId = u64;
 
+pub type Operation = OperationForKey<DEFAULT_KEY_BYTES>;
+pub type ShardOp = ShardOpForKey<DEFAULT_KEY_BYTES>;
+pub type UndoEntry = UndoEntryForKey<DEFAULT_KEY_BYTES>;
+pub type ShardUndo = ShardUndoForKey<DEFAULT_KEY_BYTES>;
+pub type ShardDelta = ShardDeltaForKey<DEFAULT_KEY_BYTES>;
+pub type BlockDelta = BlockDeltaForKey<DEFAULT_KEY_BYTES>;
+pub type BlockUndo = BlockUndoForKey<DEFAULT_KEY_BYTES>;
+
 /// A user-requested operation on the store.
 ///
 /// Operations are batched and applied atomically per block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Operation {
+pub struct OperationForKey<const N: usize> {
     /// The key to operate on
-    pub key: Key,
+    pub key: Key<N>,
     /// The value to set. Empty values delete the key.
     pub value: Value,
 }
 
-impl Operation {
+impl<const N: usize> OperationForKey<N> {
     #[inline]
     pub fn is_delete(&self) -> bool {
         self.value.is_delete()
@@ -554,12 +825,12 @@ impl Operation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShardOp {
-    pub key: Key,
+pub struct ShardOpForKey<const N: usize> {
+    pub key: Key<N>,
     pub value: Value,
 }
 
-impl ShardOp {
+impl<const N: usize> ShardOpForKey<N> {
     #[inline]
     pub fn is_delete(&self) -> bool {
         self.value.is_delete()
@@ -567,8 +838,8 @@ impl ShardOp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UndoEntry {
-    pub key: Key,
+pub struct UndoEntryForKey<const N: usize> {
+    pub key: Key<N>,
     pub previous: Option<Value>,
     pub op: UndoOp,
 }
@@ -581,28 +852,28 @@ pub enum UndoOp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ShardUndo {
+pub struct ShardUndoForKey<const N: usize> {
     pub shard_index: usize,
-    pub entries: Vec<UndoEntry>,
+    pub entries: Vec<UndoEntryForKey<N>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ShardDelta {
+pub struct ShardDeltaForKey<const N: usize> {
     pub shard_index: usize,
-    pub operations: Vec<ShardOp>,
-    pub undo_entries: Vec<UndoEntry>,
+    pub operations: Vec<ShardOpForKey<N>>,
+    pub undo_entries: Vec<UndoEntryForKey<N>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct BlockDelta {
+pub struct BlockDeltaForKey<const N: usize> {
     pub block_height: BlockId,
-    pub shards: Vec<ShardDelta>,
+    pub shards: Vec<ShardDeltaForKey<N>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct BlockUndo {
+pub struct BlockUndoForKey<const N: usize> {
     pub block_height: BlockId,
-    pub shard_undos: Vec<ShardUndo>,
+    pub shard_undos: Vec<ShardUndoForKey<N>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

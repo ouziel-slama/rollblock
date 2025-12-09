@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::error::StoreResult;
 use crate::types::{
-    BlockDelta, BlockId, BlockUndo, Key, Operation, ShardDelta, ShardOp, ShardUndo,
+    BlockDelta, BlockId, BlockUndo, Operation, ShardDelta, ShardOp, ShardUndo, StoreKey as Key,
 };
 
 pub(crate) fn plan_replay_delta(

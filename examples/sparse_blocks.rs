@@ -5,7 +5,7 @@
 //!
 //! Run with: cargo run --example sparse_blocks
 
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Block 100: First operation
     println!("  Block 100: Set key_a = 100");
-    let key_a = [1, 0, 0, 0, 0, 0, 0, 0];
+    let key_a: Key = Key::from_u64_le(1);
     store.set(
         100,
         vec![Operation {
@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Block 500: Large gap (blocks 101-499 are empty/non-existent)
     println!("  Block 500: Set key_b = 500");
-    let key_b = [2, 0, 0, 0, 0, 0, 0, 0];
+    let key_b: Key = Key::from_u64_le(2);
     store.set(
         500,
         vec![Operation {
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Block 1000: Another large gap
     println!("  Block 1000: Set key_c = 1000");
-    let key_c = [3, 0, 0, 0, 0, 0, 0, 0];
+    let key_c: Key = Key::from_u64_le(3);
     store.set(
         1000,
         vec![Operation {
@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   ✓ Empty block created");
 
     println!("\n  Block 4000: Set key_d = 4000");
-    let key_d = [4, 0, 0, 0, 0, 0, 0, 0];
+    let key_d: Key = Key::from_u64_le(4);
     store.set(
         4000,
         vec![Operation {
@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n⏪ Rollback to block 3000 (empty block)");
     store.rollback(3000)?;
 
-    println!("   ✓ State preserved up to block 2000 (last non-empty block)\n");
+    println!("   ✓ State preserved from block 100 (last non-empty block <= 3000)\n");
 
     println!("📊 Final state:");
     println!("  key_a: {}", store.get(key_a)?);

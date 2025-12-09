@@ -14,8 +14,8 @@ struct ChunkScanOutcome {
     last_good_end: u64,
 }
 
-pub(crate) fn repair_chunk_tail(path: &Path, chunk_id: u32) -> StoreResult<u64> {
-    let outcome = scan_chunk_file(path, chunk_id, false)?;
+pub(crate) fn repair_chunk_tail(path: &Path, chunk_id: u32, key_bytes: usize) -> StoreResult<u64> {
+    let outcome = scan_chunk_file(path, chunk_id, false, key_bytes)?;
     Ok(outcome.last_good_end)
 }
 
@@ -106,16 +106,17 @@ pub(crate) fn rewrite_index(index_path: &Path, metas: &[JournalMeta]) -> StoreRe
     Ok(())
 }
 
-pub(crate) fn scan_entries(chunk_dir: &Path) -> StoreResult<Vec<JournalMeta>> {
+pub(crate) fn scan_entries(chunk_dir: &Path, key_bytes: usize) -> StoreResult<Vec<JournalMeta>> {
     if !chunk_dir.exists() {
         return Ok(Vec::new());
     }
 
     let mut metas = Vec::new();
     for (chunk_id, path) in enumerate_chunk_files(chunk_dir)? {
-        match scan_chunk_file(&path, chunk_id, true) {
+        match scan_chunk_file(&path, chunk_id, true, key_bytes) {
             Ok(outcome) => metas.extend(outcome.metas),
             Err(err @ MhinStoreError::JournalChecksumMismatch { .. }) => return Err(err),
+            Err(err) if is_compatibility_error(&err) => return Err(err),
             Err(err) => {
                 tracing::warn!(
                     ?path,
@@ -135,6 +136,7 @@ fn scan_chunk_file(
     path: &Path,
     chunk_id: u32,
     collect_entries: bool,
+    key_bytes: usize,
 ) -> StoreResult<ChunkScanOutcome> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let original_len = file.metadata()?.len();
@@ -163,6 +165,15 @@ fn scan_chunk_file(
 
         let header = match JournalHeader::from_bytes(&header_bytes) {
             Ok(header) => header,
+            Err(err) if is_compatibility_error(&err) => {
+                tracing::error!(
+                    chunk_id,
+                    offset,
+                    ?err,
+                    "Encountered incompatible journal header; aborting chunk scan"
+                );
+                return Err(err);
+            }
             Err(err) => {
                 tracing::warn!(
                     chunk_id,
@@ -183,7 +194,26 @@ fn scan_chunk_file(
             checksum: header.checksum,
         };
 
-        match read_journal_block(&mut file, &meta) {
+        // If the header claims a payload that extends past the recorded chunk
+        // length, treat it as a corrupted tail instead of a compatibility error.
+        let claimed_end = offset
+            .saturating_add(JOURNAL_HEADER_SIZE as u64)
+            .saturating_add(meta.compressed_len);
+        if claimed_end > original_len {
+            tracing::warn!(
+                chunk_id,
+                offset,
+                block_height = meta.block_height,
+                compressed_len = meta.compressed_len,
+                original_len,
+                claimed_end,
+                "Detected journal entry exceeding chunk length; stopping chunk scan"
+            );
+            encountered_tail_error = true;
+            break;
+        }
+
+        match read_journal_block(&mut file, &meta, key_bytes) {
             Ok(_) => {
                 if collect_entries {
                     metas.push(meta);
@@ -198,6 +228,16 @@ fn scan_chunk_file(
                     block_height = meta.block_height,
                     ?err,
                     "Detected journal checksum mismatch; aborting chunk scan"
+                );
+                return Err(err);
+            }
+            Err(err) if is_compatibility_error(&err) => {
+                tracing::error!(
+                    chunk_id,
+                    offset,
+                    block_height = meta.block_height,
+                    ?err,
+                    "Detected incompatible journal entry; aborting chunk scan"
                 );
                 return Err(err);
             }
@@ -240,4 +280,111 @@ fn scan_chunk_file(
         metas,
         last_good_end,
     })
+}
+
+fn is_compatibility_error(err: &MhinStoreError) -> bool {
+    matches!(err, MhinStoreError::ConfigurationMismatch { .. })
+        || matches!(
+            err,
+            MhinStoreError::InvalidJournalHeader {
+                reason: "unsupported version"
+            } | MhinStoreError::InvalidJournalHeader {
+                reason: "invalid magic"
+            } | MhinStoreError::InvalidJournalHeader {
+                reason: "key width below minimum"
+            }
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::journal::chunk::chunk_file_path;
+    use crate::storage::journal::format::{
+        checksum_to_u32, serialize_journal_block, JournalHeader, JOURNAL_FLAG_UNCOMPRESSED,
+    };
+    use crate::types::{BlockUndo, Operation, StoreKey, Value};
+    use std::io::Write;
+    use tempfile::tempdir_in;
+
+    #[test]
+    fn scan_entries_rejects_mid_chunk_key_width_mismatch() {
+        let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
+        std::fs::create_dir_all(&workspace_tmp).unwrap();
+        let tmp = tempdir_in(&workspace_tmp).unwrap();
+        let chunk_path = chunk_file_path(tmp.path(), 0);
+
+        // First entry with expected key width
+        let block_height = 1;
+        let operations = vec![Operation {
+            key: StoreKey::from([0xAA; StoreKey::BYTES]),
+            value: Value::from_slice(b"ok"),
+        }];
+        let undo = BlockUndo {
+            block_height,
+            shard_undos: Vec::new(),
+        };
+        let (payload, entry_count) =
+            serialize_journal_block(block_height, &undo, &operations).unwrap();
+        let checksum = checksum_to_u32(blake3::hash(&payload));
+        let header = JournalHeader::new(
+            block_height,
+            entry_count,
+            payload.len() as u64,
+            payload.len() as u64,
+            checksum,
+            JOURNAL_FLAG_UNCOMPRESSED,
+            StoreKey::BYTES,
+        );
+
+        // Second entry with mismatched key width to simulate incompatible writer
+        let bad_block_height = 2;
+        let bad_operations = vec![Operation {
+            key: StoreKey::from([0xBB; StoreKey::BYTES]),
+            value: Value::from_slice(b"bad"),
+        }];
+        let bad_undo = BlockUndo {
+            block_height: bad_block_height,
+            shard_undos: Vec::new(),
+        };
+        let (bad_payload, bad_entry_count) =
+            serialize_journal_block(bad_block_height, &bad_undo, &bad_operations).unwrap();
+        let bad_checksum = checksum_to_u32(blake3::hash(&bad_payload));
+        let bad_header = JournalHeader::new(
+            bad_block_height,
+            bad_entry_count,
+            bad_payload.len() as u64,
+            bad_payload.len() as u64,
+            bad_checksum,
+            JOURNAL_FLAG_UNCOMPRESSED,
+            StoreKey::BYTES + 1, // mismatch
+        );
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&chunk_path)
+            .unwrap();
+        file.write_all(&header.to_bytes()).unwrap();
+        file.write_all(&payload).unwrap();
+        file.write_all(&bad_header.to_bytes()).unwrap();
+        file.write_all(&bad_payload).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let err = scan_entries(tmp.path(), StoreKey::BYTES).expect_err("should fail fast");
+        match err {
+            MhinStoreError::ConfigurationMismatch {
+                field,
+                stored,
+                requested,
+            } => {
+                assert_eq!(field, "key_bytes");
+                assert_eq!(stored, StoreKey::BYTES + 1);
+                assert_eq!(requested, StoreKey::BYTES);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

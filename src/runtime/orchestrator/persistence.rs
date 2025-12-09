@@ -25,7 +25,7 @@ use crate::state_engine::StateEngine;
 use crate::types::BlockId;
 
 use self::queue::PersistenceQueue;
-use self::runtime::PersistenceRuntime;
+use self::runtime::{PersistenceRuntime, PersistenceRuntimeConfig, SharedBlockState, StorageDeps};
 
 use super::durability::PersistenceSettings;
 
@@ -86,21 +86,30 @@ where
             let queue = Arc::new(PersistenceQueue::new(
                 settings.durability_mode.max_pending_blocks(),
             ));
+            let storage = StorageDeps {
+                journal: Arc::clone(&journal),
+                snapshotter: Arc::clone(&snapshotter),
+                metadata: Arc::clone(&metadata),
+            };
+            let shared_state = SharedBlockState {
+                durable_block: Arc::clone(&durable_block),
+                applied_block: Arc::clone(&applied_block),
+                rollback_barrier: Arc::clone(&rollback_barrier),
+                update_mutex: Arc::clone(&update_mutex),
+            };
+            let config = PersistenceRuntimeConfig {
+                metadata_sync_interval: settings.durability_mode.sync_every_n_blocks(),
+                snapshot_interval: settings.snapshot_interval,
+                max_snapshot_interval: settings.max_snapshot_interval,
+            };
             Some(PersistenceRuntime::spawn(
                 queue,
                 Arc::clone(&pending_blocks),
                 Arc::clone(&state_engine),
-                Arc::clone(&journal),
-                Arc::clone(&snapshotter),
-                Arc::clone(&metadata),
+                storage,
                 metrics.clone(),
-                Arc::clone(&durable_block),
-                Arc::clone(&applied_block),
-                Arc::clone(&rollback_barrier),
-                Arc::clone(&update_mutex),
-                settings.durability_mode.sync_every_n_blocks(),
-                settings.snapshot_interval,
-                settings.max_snapshot_interval,
+                shared_state,
+                config,
             ))
         } else {
             None

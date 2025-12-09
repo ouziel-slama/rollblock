@@ -20,6 +20,33 @@ use super::pending_blocks::PendingBlocks;
 use super::queue::PersistenceQueue;
 use super::task::{PersistenceTask, TaskStatus};
 
+/// Shared atomic state trackers used by the persistence runtime.
+pub struct SharedBlockState {
+    pub durable_block: Arc<AtomicU64>,
+    pub applied_block: Arc<AtomicU64>,
+    pub rollback_barrier: Arc<AtomicU64>,
+    pub update_mutex: Arc<Mutex<()>>,
+}
+
+/// Configuration values for the persistence runtime.
+pub struct PersistenceRuntimeConfig {
+    pub metadata_sync_interval: usize,
+    pub snapshot_interval: Duration,
+    pub max_snapshot_interval: Duration,
+}
+
+/// Storage layer dependencies for the persistence runtime.
+pub struct StorageDeps<J, S, M>
+where
+    J: BlockJournal + 'static,
+    S: Snapshotter + 'static,
+    M: MetadataStore + 'static,
+{
+    pub journal: Arc<J>,
+    pub snapshotter: Arc<S>,
+    pub metadata: Arc<M>,
+}
+
 enum PersistOutcome {
     Committed { synced: bool },
     Skipped,
@@ -78,22 +105,14 @@ where
     S: Snapshotter + 'static,
     M: MetadataStore + 'static,
 {
-    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         queue: Arc<PersistenceQueue>,
         pending_blocks: Arc<PendingBlocks>,
         state_engine: Arc<E>,
-        journal: Arc<J>,
-        snapshotter: Arc<S>,
-        metadata: Arc<M>,
+        storage: StorageDeps<J, S, M>,
         metrics: StoreMetrics,
-        durable_block: Arc<AtomicU64>,
-        applied_block: Arc<AtomicU64>,
-        rollback_barrier: Arc<AtomicU64>,
-        update_mutex: Arc<Mutex<()>>,
-        metadata_sync_interval: usize,
-        snapshot_interval: Duration,
-        max_snapshot_interval: Duration,
+        shared_state: SharedBlockState,
+        config: PersistenceRuntimeConfig,
     ) -> Arc<Self> {
         let (snapshot_tx, snapshot_rx) = mpsc::channel();
 
@@ -101,19 +120,19 @@ where
             queue: Arc::clone(&queue),
             pending_blocks,
             state_engine,
-            journal,
-            snapshotter,
-            metadata,
+            journal: storage.journal,
+            snapshotter: storage.snapshotter,
+            metadata: storage.metadata,
             metrics: metrics.clone(),
             fatal_error: Mutex::new(None),
-            durable_block,
-            applied_block,
-            rollback_barrier,
-            metadata_sync_interval: AtomicUsize::new(metadata_sync_interval),
+            durable_block: shared_state.durable_block,
+            applied_block: shared_state.applied_block,
+            rollback_barrier: shared_state.rollback_barrier,
+            metadata_sync_interval: AtomicUsize::new(config.metadata_sync_interval),
             pending_metadata: Mutex::new(Vec::new()),
-            update_mutex,
-            snapshot_interval,
-            max_snapshot_interval,
+            update_mutex: shared_state.update_mutex,
+            snapshot_interval: config.snapshot_interval,
+            max_snapshot_interval: config.max_snapshot_interval,
             worker: Mutex::new(None),
             snapshot_worker: Mutex::new(None),
             snapshot_scheduler: Mutex::new(None),
@@ -142,7 +161,7 @@ where
 
         *runtime.snapshot_worker.lock() = Some(snapshot_handle);
 
-        if !snapshot_interval.is_zero() {
+        if !runtime.snapshot_interval.is_zero() {
             let scheduler_runtime = Arc::clone(&runtime);
             let scheduler_handle = std::thread::Builder::new()
                 .name("rollblock-snapshot-scheduler".to_string())

@@ -5,7 +5,9 @@ use hashbrown::raw::RawTable;
 use parking_lot::RwLock;
 
 use super::StateShard;
-use crate::types::{Key, ShardOp, ShardStats, ShardUndo, UndoEntry, UndoOp, Value, ValueBuf};
+use crate::types::{
+    ShardOp, ShardStats, ShardUndo, StoreKey as Key, UndoEntry, UndoOp, Value, ValueBuf,
+};
 
 pub struct RawTableShard {
     shard_index: usize,
@@ -232,7 +234,7 @@ mod tests {
     #[test]
     fn insert_update_delete_cycle() {
         let shard = RawTableShard::new(3, 16);
-        let key = [0u8; 8];
+        let key: Key = [0u8; Key::BYTES].into();
 
         let insert_undo = shard.apply(&[shard_op(key, num(10))]);
         assert_eq!(insert_undo.shard_index, 3);
@@ -264,8 +266,8 @@ mod tests {
     #[test]
     fn revert_restores_state_after_batch_operations() {
         let shard = RawTableShard::new(1, 8);
-        let key_a = [1u8; 8];
-        let key_b = [2u8; 8];
+        let key_a: Key = [1u8; Key::BYTES].into();
+        let key_b: Key = [2u8; Key::BYTES].into();
 
         let undo = shard.apply(&[
             shard_op(key_a, num(5)),
@@ -288,8 +290,8 @@ mod tests {
     #[test]
     fn export_data_returns_all_pairs() {
         let shard = RawTableShard::new(0, 4);
-        let key_a = [3u8; 8];
-        let key_b = [4u8; 8];
+        let key_a: Key = [3u8; Key::BYTES].into();
+        let key_b: Key = [4u8; Key::BYTES].into();
 
         shard.apply(&[shard_op(key_a, num(21)), shard_op(key_b, num(34))]);
 
@@ -307,12 +309,12 @@ mod tests {
     #[test]
     fn import_data_replaces_existing_state() {
         let shard = RawTableShard::new(2, 2);
-        let old_key = [5u8; 8];
+        let old_key: Key = [5u8; Key::BYTES].into();
         shard.apply(&[shard_op(old_key, num(99))]);
         assert_eq!(shard.get(&old_key).map(Value::from), Some(num(99)));
 
-        let new_key_a = [8u8; 8];
-        let new_key_b = [9u8; 8];
+        let new_key_a: Key = [8u8; Key::BYTES].into();
+        let new_key_b: Key = [9u8; Key::BYTES].into();
         shard.import_data(vec![
             (new_key_a, ValueBuf::from(num(1))),
             (new_key_b, ValueBuf::from(num(2))),
@@ -327,7 +329,7 @@ mod tests {
     #[test]
     fn revert_updated_entry_with_no_previous_value_removes_key() {
         let shard = RawTableShard::new(3, 4);
-        let key = [6u8; 8];
+        let key: Key = [6u8; Key::BYTES].into();
         shard.apply(&[shard_op(key, num(55))]);
         assert_eq!(shard.get(&key).map(Value::from), Some(num(55)));
 

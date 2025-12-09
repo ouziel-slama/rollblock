@@ -9,7 +9,7 @@ mod recovery;
 mod tests;
 
 use crate::error::{MhinStoreError, StoreResult};
-use crate::types::{BlockId, Key, Operation, Value};
+use crate::types::{BlockId, Operation, StoreKey as Key, Value};
 
 pub use block::MhinStoreBlockFacade;
 pub use config::{RemoteServerSettings, StoreConfig};
@@ -66,7 +66,7 @@ pub trait StoreFacade: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `key` - The 8-byte key to look up
+    /// * `key` - The fixed-width key to look up (compile-time width)
     ///
     /// # Returns
     ///
@@ -76,7 +76,7 @@ pub trait StoreFacade: Send + Sync {
     /// # Examples
     ///
     /// ```ignore
-    /// let key = [1, 2, 3, 4, 5, 6, 7, 8];
+    /// let key = Key::from([1, 2, 3, 4, 5, 6, 7, 8]);
     /// let value = store.get(key)?;
     /// if value.is_delete() {
     ///     println!("Key not found");

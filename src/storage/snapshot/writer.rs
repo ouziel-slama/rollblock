@@ -6,9 +6,9 @@ use std::sync::Arc;
 use crate::error::{MhinStoreError, StoreResult};
 use crate::state_shard::StateShard;
 use crate::storage::fs::sync_directory;
-use crate::types::{BlockId, Key, ValueBuf, MAX_VALUE_BYTES};
+use crate::types::{BlockId, StoreKey as Key, ValueBuf, MAX_VALUE_BYTES};
 
-use super::format::{checksum_from_reader, encode_header, SNAPSHOT_HEADER_SIZE_V2};
+use super::format::{checksum_from_reader, encode_header, SNAPSHOT_HEADER_SIZE};
 use super::gc::snapshot_path;
 
 pub(super) fn write_snapshot(
@@ -24,7 +24,7 @@ pub(super) fn write_snapshot(
         std::fs::remove_file(&tmp_path)?;
     }
 
-    let header = encode_header(block, shard_count);
+    let header = encode_header(block, shard_count, Key::BYTES);
 
     let file = OpenOptions::new()
         .create(true)
@@ -43,7 +43,7 @@ pub(super) fn write_snapshot(
     let mut offsets = Vec::with_capacity(shards.len());
     let mut counts = Vec::with_capacity(shards.len());
     let mut current_offset =
-        SNAPSHOT_HEADER_SIZE_V2 as u64 + shard_count * std::mem::size_of::<u64>() as u64;
+        SNAPSHOT_HEADER_SIZE as u64 + shard_count * std::mem::size_of::<u64>() as u64;
 
     for shard in shards {
         offsets.push(current_offset);
@@ -92,13 +92,14 @@ pub(super) fn write_snapshot(
                     reason: "snapshot size overflow while writing shard data".to_string(),
                 };
 
-                let entry_bytes = match (8u64 + 2u64).checked_add(value_bytes.len() as u64) {
-                    Some(len) => len,
-                    None => {
-                        write_result = Err(overflow_error());
-                        return;
-                    }
-                };
+                let entry_bytes =
+                    match (Key::BYTES as u64 + 2u64).checked_add(value_bytes.len() as u64) {
+                        Some(len) => len,
+                        None => {
+                            write_result = Err(overflow_error());
+                            return;
+                        }
+                    };
 
                 section_bytes = match section_bytes.checked_add(entry_bytes) {
                     Some(total) => total,
@@ -147,7 +148,7 @@ pub(super) fn write_snapshot(
     }
 
     if !offsets.is_empty() {
-        file.seek(SeekFrom::Start(SNAPSHOT_HEADER_SIZE_V2 as u64))?;
+        file.seek(SeekFrom::Start(SNAPSHOT_HEADER_SIZE as u64))?;
         for offset in &offsets {
             file.write_all(&offset.to_le_bytes())?;
         }
@@ -155,7 +156,7 @@ pub(super) fn write_snapshot(
     file.sync_data()?;
 
     let mut reader = BufReader::new(file.try_clone()?);
-    reader.seek(SeekFrom::Start(SNAPSHOT_HEADER_SIZE_V2 as u64))?;
+    reader.seek(SeekFrom::Start(SNAPSHOT_HEADER_SIZE as u64))?;
     let checksum = checksum_from_reader(&mut reader)?;
     drop(reader);
 

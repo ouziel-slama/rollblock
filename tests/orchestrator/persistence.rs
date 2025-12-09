@@ -12,7 +12,7 @@ use rollblock::orchestrator::{
 };
 use rollblock::state_engine::ShardedStateEngine;
 use rollblock::state_shard::{RawTableShard, StateShard};
-use rollblock::types::{BlockId, JournalMeta, Operation};
+use rollblock::types::{BlockId, JournalMeta, Operation, StoreKey as Key};
 use rollblock::FileBlockJournal;
 use rollblock::MetadataStore;
 use rollblock::StoreResult;
@@ -116,12 +116,12 @@ fn async_persistence_failure_is_fatal() {
     )
     .unwrap();
 
-    let key_a = [1u8; 8];
+    let key_a: Key = [1u8; Key::BYTES].into();
     orchestrator
         .apply_operations(1, vec![operation(key_a, 10)])
         .unwrap();
 
-    let key_b = [2u8; 8];
+    let key_b: Key = [2u8; Key::BYTES].into();
     orchestrator
         .apply_operations(2, vec![operation(key_b, 20)])
         .unwrap();
@@ -139,7 +139,7 @@ fn async_persistence_failure_is_fatal() {
         other => panic!("unexpected error: {other:?}"),
     }
 
-    let key_c = [3u8; 8];
+    let key_c: Key = [3u8; Key::BYTES].into();
     let err = orchestrator
         .apply_operations(3, vec![operation(key_c, 30)])
         .unwrap_err();
@@ -194,7 +194,7 @@ fn async_empty_block_eventually_becomes_durable() {
     )
     .unwrap();
 
-    let key = [0xE1u8; 8];
+    let key = [0xE1u8; Key::BYTES];
 
     orchestrator
         .apply_operations(1, vec![operation(key, 11)])
@@ -250,7 +250,7 @@ fn async_snapshots_do_not_block_queue() {
     .unwrap();
 
     orchestrator
-        .apply_operations(1, vec![operation([0x11u8; 8], 11)])
+        .apply_operations(1, vec![operation([0x11u8; Key::BYTES], 11)])
         .unwrap();
     wait_for_block(&metadata, 1);
 
@@ -266,7 +266,7 @@ fn async_snapshots_do_not_block_queue() {
     let mut progressed_while_snapshot = false;
 
     for block in 2..=5 {
-        let key = [block as u8; 8];
+        let key = [block as u8; Key::BYTES];
         orchestrator
             .apply_operations(block, vec![operation(key, block * 10)])
             .unwrap();
@@ -343,7 +343,7 @@ fn forces_snapshot_after_max_interval() {
     )
     .unwrap();
 
-    let key_a = [0xA1u8; 8];
+    let key_a = [0xA1u8; Key::BYTES];
     orchestrator
         .apply_operations(1, vec![operation(key_a, 1)])
         .unwrap();
@@ -363,7 +363,7 @@ fn forces_snapshot_after_max_interval() {
         panic!("forced snapshot never started");
     });
 
-    let key_b = [0xB2u8; 8];
+    let key_b = [0xB2u8; Key::BYTES];
     orchestrator
         .apply_operations(2, vec![operation(key_b, 2)])
         .unwrap();
@@ -403,19 +403,19 @@ fn async_rollback_handles_inflight_persistence() {
     )
     .unwrap();
 
-    let key_a = [1u8; 8];
+    let key_a: Key = [1u8; Key::BYTES].into();
     orchestrator
         .apply_operations(1, vec![operation(key_a, 10)])
         .unwrap();
     wait_for_block(&metadata, 1);
 
-    let key_b = [2u8; 8];
+    let key_b: Key = [2u8; Key::BYTES].into();
     orchestrator
         .apply_operations(2, vec![operation(key_b, 20)])
         .unwrap();
     wait_for_block(&metadata, 2);
 
-    let key_c = [3u8; 8];
+    let key_c: Key = [3u8; Key::BYTES].into();
     orchestrator
         .apply_operations(3, vec![operation(key_c, 30)])
         .unwrap();
@@ -469,19 +469,19 @@ fn async_rollback_discarded_inflight_persistence_is_skipped() {
     )
     .unwrap();
 
-    let key_a = [21u8; 8];
+    let key_a: Key = [21u8; Key::BYTES].into();
     orchestrator
         .apply_operations(1, vec![operation(key_a, 10)])
         .unwrap();
     wait_for_block(&metadata, 1);
 
-    let key_b = [22u8; 8];
+    let key_b: Key = [22u8; Key::BYTES].into();
     orchestrator
         .apply_operations(2, vec![operation(key_b, 20)])
         .unwrap();
     wait_for_block(&metadata, 2);
 
-    let key_c = [23u8; 8];
+    let key_c: Key = [23u8; Key::BYTES].into();
     orchestrator
         .apply_operations(3, vec![operation(key_c, 30)])
         .unwrap();
@@ -575,19 +575,19 @@ fn async_rollback_to_non_persisted_target_keeps_state() {
     )
     .unwrap();
 
-    let key_a = [10u8; 8];
+    let key_a: Key = [10u8; Key::BYTES].into();
     orchestrator
         .apply_operations(1, vec![operation(key_a, 42)])
         .unwrap();
     wait_for_block(&metadata, 1);
 
-    let key_b = [11u8; 8];
+    let key_b: Key = [11u8; Key::BYTES].into();
     orchestrator
         .apply_operations(2, vec![operation(key_b, 84)])
         .unwrap();
     wait_for_block(&metadata, 2);
 
-    let key_c = [12u8; 8];
+    let key_c: Key = [12u8; Key::BYTES].into();
     orchestrator
         .apply_operations(3, vec![operation(key_c, 126)])
         .unwrap();
@@ -634,12 +634,12 @@ fn synchronous_persistence_failure_is_fatal() {
     )
     .unwrap();
 
-    let key_a = [1u8; 8];
+    let key_a: Key = [1u8; Key::BYTES].into();
     orchestrator
         .apply_operations(1, vec![operation(key_a, 10)])
         .unwrap();
 
-    let key_b = [2u8; 8];
+    let key_b: Key = [2u8; Key::BYTES].into();
     let err = orchestrator
         .apply_operations(2, vec![operation(key_b, 20)])
         .unwrap_err();

@@ -20,14 +20,14 @@ use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig as TlsServerCon
 use tokio_rustls::TlsAcceptor;
 
 use crate::facade::{MhinStoreFacade, StoreFacade};
-use crate::types::{Value, MAX_VALUE_BYTES};
+use crate::types::{StoreKey as Key, Value, MAX_VALUE_BYTES};
 
 use super::BasicAuthConfig;
 
 type BufferedReader<S> = AsyncBufReader<ReadHalf<S>>;
 type StreamWriter<S> = WriteHalf<S>;
 
-const KEY_WIDTH: usize = 8;
+const KEY_BYTES_FIELD_WIDTH: usize = 2;
 const VALUE_LEN_WIDTH: usize = 2;
 const MAX_KEYS_PER_REQUEST: usize = 255;
 const MAX_RESPONSE_BYTES: usize = MAX_KEYS_PER_REQUEST * (VALUE_LEN_WIDTH + MAX_VALUE_BYTES);
@@ -336,7 +336,7 @@ where
         return Err(ConnectionError::Protocol(err));
     }
 
-    let mut request_buf = Vec::with_capacity(KEY_WIDTH * MAX_KEYS_PER_REQUEST);
+    let mut request_buf = Vec::with_capacity(Key::BYTES * MAX_KEYS_PER_REQUEST);
 
     loop {
         let key_count = match read_key_count(&mut reader, &state).await {
@@ -350,7 +350,7 @@ where
             Err(err) => return Err(err),
         };
 
-        let payload_len = key_count as usize * KEY_WIDTH;
+        let payload_len = key_count as usize * Key::BYTES;
         request_buf.resize(payload_len, 0);
 
         if let Err(err) =
@@ -368,12 +368,12 @@ where
 
         let start = Instant::now();
 
-        let keys: Vec<[u8; KEY_WIDTH]> = request_buf
-            .chunks_exact(KEY_WIDTH)
+        let keys: Vec<Key> = request_buf
+            .chunks_exact(Key::BYTES)
             .map(|chunk| {
-                let mut key = [0u8; KEY_WIDTH];
+                let mut key = [0u8; Key::BYTES];
                 key.copy_from_slice(chunk);
-                key
+                Key::from(key)
             })
             .collect();
 
@@ -500,7 +500,7 @@ where
         return Err(ProtocolError::Unauthorized);
     }
 
-    send_code(writer, AUTH_READY)
+    send_handshake(writer)
         .await
         .map_err(|_| ProtocolError::Timeout)?;
     Ok(())
@@ -618,6 +618,18 @@ where
     writer.flush().await
 }
 
+async fn send_handshake<S>(writer: &mut StreamWriter<S>) -> Result<(), std::io::Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let key_bytes = Key::BYTES as u16;
+    let mut payload = [0u8; 1 + KEY_BYTES_FIELD_WIDTH];
+    payload[0] = AUTH_READY;
+    payload[1..].copy_from_slice(&key_bytes.to_le_bytes());
+    writer.write_all(&payload).await?;
+    writer.flush().await
+}
+
 fn build_tls_config(
     cert_path: &Path,
     key_path: &Path,
@@ -718,7 +730,7 @@ enum ServerSecurityMode {
 mod tests {
     use super::*;
     use crate::error::StoreResult;
-    use crate::types::{BlockId, Key, Operation, Value};
+    use crate::types::{BlockId, Operation, StoreKey as Key, Value};
     use crate::BlockOrchestrator;
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -825,8 +837,8 @@ mod tests {
     #[tokio::test]
     async fn serve_connection_batches_remote_reads() {
         let orchestrator = CountingOrchestrator::new();
-        orchestrator.put([1u8; 8], 7.into());
-        orchestrator.put([2u8; 8], 19.into());
+        orchestrator.put([1u8; Key::BYTES].into(), 7.into());
+        orchestrator.put([2u8; Key::BYTES].into(), 19.into());
 
         let facade = MhinStoreFacade::new_for_testing(
             orchestrator.clone(),
@@ -854,11 +866,15 @@ mod tests {
         });
 
         client.write_all(b"proto proto\n").await.unwrap();
-        let mut auth_ready = [0u8; 1];
-        client.read_exact(&mut auth_ready).await.unwrap();
-        assert_eq!(auth_ready[0], AUTH_READY);
+        let mut handshake = [0u8; 1 + KEY_BYTES_FIELD_WIDTH];
+        client.read_exact(&mut handshake).await.unwrap();
+        assert_eq!(handshake[0], AUTH_READY);
+        assert_eq!(
+            u16::from_le_bytes([handshake[1], handshake[2]]) as usize,
+            Key::BYTES
+        );
 
-        let keys = [[1u8; 8], [2u8; 8]];
+        let keys = [[1u8; Key::BYTES], [2u8; Key::BYTES]];
         client.write_all(&[keys.len() as u8]).await.unwrap();
         for key in keys {
             client.write_all(&key).await.unwrap();

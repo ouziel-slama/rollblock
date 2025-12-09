@@ -8,7 +8,9 @@ use crate::metadata::MetadataStore;
 use crate::state::shard::StateShard;
 #[cfg(test)]
 use crate::types::Value;
-use crate::types::{BlockDelta, BlockId, BlockUndo, Key, Operation, StateStats, ValueBuf};
+use crate::types::{
+    BlockDelta, BlockId, BlockUndo, Operation, StateStats, StoreKey as Key, ValueBuf,
+};
 
 mod executor;
 mod hashing;
@@ -244,9 +246,11 @@ where
 mod tests {
     use super::*;
     use crate::state::engine::hashing::shard_hash;
+    use crate::types::DEFAULT_KEY_BYTES;
     use std::collections::BTreeMap;
     use std::ops::RangeInclusive;
     use std::sync::Mutex;
+    use xxhash_rust::xxh3::xxh3_64;
 
     use crate::error::MhinStoreError;
     use crate::metadata::GcWatermark;
@@ -344,12 +348,18 @@ mod tests {
         }
     }
 
-    fn op(key: Key, value: Value) -> Operation {
-        Operation { key, value }
+    fn op(key: impl Into<Key>, value: Value) -> Operation {
+        Operation {
+            key: key.into(),
+            value,
+        }
     }
 
-    fn shard_op(key: Key, value: Value) -> ShardOp {
-        ShardOp { key, value }
+    fn shard_op(key: impl Into<Key>, value: Value) -> ShardOp {
+        ShardOp {
+            key: key.into(),
+            value,
+        }
     }
 
     fn val(num: u64) -> Value {
@@ -360,16 +370,31 @@ mod tests {
         Value::empty()
     }
 
-    fn op_num(key: Key, num: u64) -> Operation {
+    fn op_num(key: impl Into<Key> + Copy, num: u64) -> Operation {
         op(key, val(num))
     }
 
-    fn op_delete(key: Key) -> Operation {
+    fn op_delete(key: impl Into<Key> + Copy) -> Operation {
         op(key, del())
     }
 
-    fn shard_op_num(key: Key, num: u64) -> ShardOp {
+    fn shard_op_num(key: impl Into<Key> + Copy, num: u64) -> ShardOp {
         shard_op(key, val(num))
+    }
+
+    /// Creates a test key from a u64, using a specific pattern for predictable distribution.
+    fn test_key(i: u64) -> Key {
+        // Use a pattern that differs from from_u64_le to test shard distribution
+        Key::from_prefix([
+            (i & 0xFF) as u8,
+            ((i >> 8) & 0xFF) as u8,
+            ((i >> 16) & 0xFF) as u8,
+            ((i >> 24) & 0xFF) as u8,
+            0,
+            0,
+            0,
+            i as u8,
+        ])
     }
 
     #[test]
@@ -384,10 +409,10 @@ mod tests {
     fn prepare_journal_collects_expected_undo_entries() {
         let metadata = Arc::new(MemoryMetadataStore::default());
         let shard = Arc::new(RawTableShard::new(0, 8)) as Arc<dyn StateShard>;
-        shard.apply(&[shard_op_num([1u8; 8], 3)]);
+        shard.apply(&[shard_op_num([1u8; Key::BYTES], 3)]);
 
         let engine = ShardedStateEngine::new(vec![Arc::clone(&shard)], Arc::clone(&metadata));
-        let key = [1u8; 8];
+        let key: Key = [1u8; Key::BYTES].into();
 
         let ops = vec![op_num(key, 10), op_delete(key)];
 
@@ -409,7 +434,7 @@ mod tests {
         let metadata = Arc::new(MemoryMetadataStore::default());
         let shard = Arc::new(RawTableShard::new(0, 8)) as Arc<dyn StateShard>;
         let engine = ShardedStateEngine::new(vec![Arc::clone(&shard)], Arc::clone(&metadata));
-        let key = [7u8; 8];
+        let key: Key = [7u8; Key::BYTES].into();
 
         let ops = vec![op_num(key, 5), op_num(key, 9)];
 
@@ -440,14 +465,14 @@ mod tests {
 
         let engine = ShardedStateEngine::new(shards, metadata);
 
-        let key_a = [1u8; 8];
-        let key_b = [2u8; 8];
+        let key_a: Key = [1u8; Key::BYTES].into();
+        let key_b: Key = [2u8; Key::BYTES].into();
         let shard_idx_a = engine.shard_index_for_key(&key_a).unwrap();
         raw_shards[shard_idx_a].apply(&[shard_op_num(key_a, 10)]);
         let shard_idx_b = engine.shard_index_for_key(&key_b).unwrap();
         raw_shards[shard_idx_b].apply(&[shard_op_num(key_b, 20)]);
 
-        let keys = vec![key_b, [3u8; 8], key_a];
+        let keys = vec![key_b, Key::from([3u8; Key::BYTES]), key_a];
         let results = engine.lookup_many(&keys);
 
         let actual: Vec<Option<Value>> = results
@@ -458,10 +483,10 @@ mod tests {
     }
 
     #[test]
-    fn shard_hash_reference_value_is_stable() {
-        let key = [0u8; 8];
+    fn shard_hash_uses_xxh3_over_key_bytes() {
+        let key = Key::from([0u8; Key::BYTES]);
         let hash = shard_hash(&key);
-        assert_eq!(hash, 0);
+        assert_eq!(hash, xxh3_64(&[0u8; DEFAULT_KEY_BYTES]));
     }
 
     #[test]
@@ -471,8 +496,10 @@ mod tests {
             .map(|index| Arc::new(RawTableShard::new(index, 8)) as Arc<dyn StateShard>)
             .collect();
         let engine = ShardedStateEngine::new(shards, metadata);
-        let key = [0u8; 8];
-        assert_eq!(engine.shard_index_for_key(&key), Some(0));
+        let key = Key::from([0u8; Key::BYTES]);
+        let expected =
+            (xxhash_rust::xxh3::xxh3_64(key.as_slice()) % engine.shard_count() as u64) as usize;
+        assert_eq!(engine.shard_index_for_key(&key), Some(expected));
     }
 
     #[test]
@@ -480,7 +507,7 @@ mod tests {
         let metadata = Arc::new(MemoryMetadataStore::default());
         let shard = Arc::new(RawTableShard::new(0, 8)) as Arc<dyn StateShard>;
         let engine = ShardedStateEngine::new(vec![Arc::clone(&shard)], metadata);
-        let key = [2u8; 8];
+        let key = Key::from([2u8; Key::BYTES]);
 
         let ops = vec![op_delete(key)];
         let delta = engine.prepare_journal(5, &ops).unwrap();
@@ -539,7 +566,7 @@ mod tests {
         let metadata = Arc::new(MemoryMetadataStore::default());
         let shard = Arc::new(RawTableShard::new(0, 8)) as Arc<dyn StateShard>;
         let engine = ShardedStateEngine::new(vec![Arc::clone(&shard)], metadata);
-        let key = [9u8; 8];
+        let key = Key::from([9u8; Key::BYTES]);
 
         let delta = BlockDelta {
             block_height: 1,
@@ -591,7 +618,7 @@ mod tests {
     fn lookup_without_shards_returns_none() {
         let metadata = Arc::new(MemoryMetadataStore::default());
         let engine = ShardedStateEngine::new(Vec::new(), metadata);
-        let key = [1u8; 8];
+        let key = Key::from([1u8; Key::BYTES]);
         assert!(engine.lookup(&key).is_none());
         assert!(engine.shard_index_for_key(&key).is_none());
     }
@@ -641,16 +668,7 @@ mod tests {
 
         let mut ops = Vec::new();
         for i in 0..64u64 {
-            let key = [
-                (i & 0xFF) as u8,
-                ((i >> 8) & 0xFF) as u8,
-                ((i >> 16) & 0xFF) as u8,
-                ((i >> 24) & 0xFF) as u8,
-                0,
-                0,
-                0,
-                i as u8,
-            ];
+            let key = test_key(i);
             if i == 0 {
                 ops.push(op_delete(key));
             } else {
@@ -665,32 +683,14 @@ mod tests {
         assert_eq!(stats.modified_keys, ops.len() - zero_deletes);
 
         for i in [0u64, 1, 10, 63] {
-            let key = [
-                (i & 0xFF) as u8,
-                ((i >> 8) & 0xFF) as u8,
-                ((i >> 16) & 0xFF) as u8,
-                ((i >> 24) & 0xFF) as u8,
-                0,
-                0,
-                0,
-                i as u8,
-            ];
+            let key = test_key(i);
             let expected = if i == 0 { None } else { Some(val(i)) };
             assert_eq!(engine.lookup(&key).map(Value::from), expected);
         }
 
         engine.revert(1, undo).unwrap();
         for i in [0u64, 1, 10, 63] {
-            let key = [
-                (i & 0xFF) as u8,
-                ((i >> 8) & 0xFF) as u8,
-                ((i >> 16) & 0xFF) as u8,
-                ((i >> 24) & 0xFF) as u8,
-                0,
-                0,
-                0,
-                i as u8,
-            ];
+            let key = test_key(i);
             assert_eq!(engine.lookup(&key), None);
         }
     }

@@ -21,7 +21,7 @@ pub use persistence::PersistenceContext;
 use crate::block_journal::SyncPolicy;
 use crate::error::StoreResult;
 use crate::metrics::StoreMetrics;
-use crate::types::{BlockId, Key, Operation, Value};
+use crate::types::{BlockId, Operation, StoreKey as Key, Value};
 
 /// API surfaced by orchestrator implementations.
 pub trait BlockOrchestrator: Send + Sync {

@@ -1,4 +1,4 @@
-use crate::types::{Key, ShardOp, ShardStats, ShardUndo, ValueBuf};
+use crate::types::{ShardOp, ShardStats, ShardUndo, StoreKey as Key, ValueBuf};
 
 pub mod raw_table;
 

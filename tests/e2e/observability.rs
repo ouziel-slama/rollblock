@@ -3,7 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rollblock::metrics::HealthState;
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::Value;
 use rollblock::{DurabilityMode, MhinStoreError, StoreFacade, StoreResult};
 
@@ -21,8 +21,8 @@ fn e2e_metrics_health() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let key_a = [0xA1u8; 8];
-    let key_b = [0xB2u8; 8];
+    let key_a: Key = [0xA1u8; Key::BYTES].into();
+    let key_b: Key = [0xB2u8; Key::BYTES].into();
 
     apply_block(
         &store,
@@ -116,7 +116,7 @@ fn e2e_error_propagation() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let key = [0xC3u8; 8];
+    let key: Key = [0xC3u8; Key::BYTES].into();
 
     apply_block(
         &store,

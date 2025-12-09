@@ -8,7 +8,7 @@ use crate::metadata::MetadataStore;
 use crate::snapshot::Snapshotter;
 use crate::state_engine::StateEngine;
 use crate::storage::journal::{JournalPruneReport, JournalPruner};
-use crate::types::{BlockId, BlockUndo, JournalMeta, Key, Operation, Value};
+use crate::types::{BlockId, BlockUndo, JournalMeta, Operation, StoreKey as Key, Value};
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 use super::durability::PersistenceSettings;
@@ -712,7 +712,7 @@ where
     }
 
     #[tracing::instrument(skip(self), fields(key = ?key))]
-    fn fetch(&self, key: crate::types::Key) -> StoreResult<Value> {
+    fn fetch(&self, key: Key) -> StoreResult<Value> {
         let mut values = self.lookup_batch(std::slice::from_ref(&key))?;
         Ok(values.pop().unwrap_or_else(Value::empty))
     }

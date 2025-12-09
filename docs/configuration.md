@@ -53,6 +53,22 @@
 | `worker_threads` | CPU cores | `with_worker_threads(usize)` |
 
 > ⚠️ The embedded server refuses to start until you override the placeholder `proto`/`proto` credentials. Call `with_basic_auth` (or `with_auth_config`) with production values before enabling it.
+>
+> The remote protocol advertises the compile-time key width during the handshake; clients disconnect if their build uses a different width.
+
+### Compile-time key width
+
+Keys have a fixed width per build (8 to 64 bytes). Choose it at compile time:
+
+```
+ROLLBLOCK_KEY_BYTES=16 cargo build --release
+```
+
+- Cargo features: `key-8` through `key-64` (one per byte) set the width explicitly; enable only one.
+- Valid range: 8 to 64 (anything larger is rejected to keep keys small).
+- Server and clients must be rebuilt with the same value.
+- Changing the width requires recreating data directories and snapshots/journal files.
+- Breaking change: releases with this handshake and xxh3 sharding are not compatible with earlier builds; upgrade by rebuilding all binaries and reinitialising data (snapshots/journals) from a trusted source.
 
 ---
 

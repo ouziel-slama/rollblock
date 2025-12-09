@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use rollblock::block_journal::FileBlockJournal;
 use rollblock::storage::metadata::{GcWatermark, LmdbMetadataStore};
-use rollblock::types::{Operation, Value};
+use rollblock::types::{Operation, StoreKey as Key, Value};
 use rollblock::{
     BlockJournal, DurabilityMode, MetadataStore, MhinStoreError, MhinStoreFacade, StoreConfig,
     StoreFacade,
@@ -57,7 +57,7 @@ fn active_handle_blocks_second_open_even_for_reads() {
     let config = StoreConfig::new(&data_dir, 2, 16, 1, false)
         .expect("valid config")
         .without_remote_server();
-    let key = [0xAAu8; 8];
+    let key: Key = [0xAAu8; Key::BYTES].into();
 
     let writer = MhinStoreFacade::new(config.clone()).expect("initial writer");
     writer
@@ -282,7 +282,7 @@ fn write_blocks(store: &dyn StoreFacade, start: u64, count: u64) -> rollblock::S
 }
 
 fn heavy_operation(height: u64) -> Operation {
-    let key = height.to_le_bytes();
+    let key = Key::from_u64_le(height);
     let mut payload = vec![0u8; 256];
     payload[0] = (height & 0xFF) as u8;
     Operation {

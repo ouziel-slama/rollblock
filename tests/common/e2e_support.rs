@@ -38,8 +38,8 @@ fn testdata_root() -> PathBuf {
 }
 
 pub struct StoreHarness {
-    #[allow(unused)]
-    tempdir: TempDir,
+    /// Kept alive to prevent deletion of the temporary directory.
+    _tempdir: TempDir,
     data_dir: PathBuf,
     config: StoreConfig,
 }
@@ -172,7 +172,7 @@ impl StoreHarnessBuilder {
         config.journal_chunk_size_bytes = self.journal_chunk_size_bytes;
 
         StoreHarness {
-            tempdir: self.tempdir,
+            _tempdir: self.tempdir,
             data_dir,
             config,
         }

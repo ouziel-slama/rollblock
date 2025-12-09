@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
@@ -10,9 +11,9 @@ use rustls::{ClientConfig as TlsClientConfig, ClientConnection, RootCertStore, S
 use rustls_pemfile::certs;
 
 use crate::net::BasicAuthConfig;
-use crate::types::{Key, MAX_VALUE_BYTES};
+use crate::types::{StoreKey as Key, MAX_KEY_BYTES, MAX_VALUE_BYTES, MIN_KEY_BYTES};
 
-const KEY_WIDTH: usize = 8;
+const KEY_BYTES_FIELD_WIDTH: usize = 2;
 const VALUE_LEN_WIDTH: usize = 2;
 const MAX_KEYS_PER_REQUEST: usize = 255;
 const AUTH_READY: u8 = 0;
@@ -77,6 +78,17 @@ pub struct RemoteStoreClient {
     stream: ClientStream,
     request_buf: Vec<u8>,
     response_buf: Vec<u8>,
+    key_bytes: usize,
+}
+
+impl fmt::Debug for RemoteStoreClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteStoreClient")
+            .field("key_bytes", &self.key_bytes)
+            .field("request_buf_len", &self.request_buf.len())
+            .field("response_buf_len", &self.response_buf.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RemoteStoreClient {
@@ -127,10 +139,27 @@ impl RemoteStoreClient {
             return Err(ClientError::Server { code: ack[0] });
         }
 
+        let mut key_bytes_buf = [0u8; KEY_BYTES_FIELD_WIDTH];
+        read_response_chunk(&mut stream, &mut key_bytes_buf, false)?;
+        let negotiated_key_bytes = u16::from_le_bytes(key_bytes_buf) as usize;
+        if negotiated_key_bytes < MIN_KEY_BYTES {
+            return Err(ClientError::InvalidResponse("key width below minimum"));
+        }
+        if negotiated_key_bytes > MAX_KEY_BYTES {
+            return Err(ClientError::InvalidResponse("key width above maximum"));
+        }
+        if negotiated_key_bytes != Key::BYTES {
+            return Err(ClientError::KeyWidthMismatch {
+                server: negotiated_key_bytes,
+                client: Key::BYTES,
+            });
+        }
+
         Ok(Self {
             stream,
-            request_buf: Vec::with_capacity(1 + KEY_WIDTH * MAX_KEYS_PER_REQUEST),
+            request_buf: Vec::with_capacity(1 + negotiated_key_bytes * MAX_KEYS_PER_REQUEST),
             response_buf: Vec::with_capacity(1024),
+            key_bytes: negotiated_key_bytes,
         })
     }
 
@@ -153,7 +182,8 @@ impl RemoteStoreClient {
         self.request_buf.clear();
         self.request_buf.push(keys.len() as u8);
         for key in keys {
-            self.request_buf.extend_from_slice(key);
+            debug_assert_eq!(key.as_slice().len(), self.key_bytes);
+            self.request_buf.extend_from_slice(key.as_slice());
         }
 
         self.stream.write_all(&self.request_buf).map_err(map_io)?;
@@ -282,6 +312,8 @@ pub enum ClientError {
     InvalidRequest(&'static str),
     #[error("invalid response from server: {0}")]
     InvalidResponse(&'static str),
+    #[error("key width mismatch: server uses {server} bytes, client built with {client} bytes")]
+    KeyWidthMismatch { server: usize, client: usize },
     #[error("server returned error code {code}")]
     Server { code: u8 },
     #[error("connection closed before response (received {received} of {expected} bytes)")]

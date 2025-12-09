@@ -8,13 +8,13 @@ cargo add rollblock
 
 ```rust
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 
 fn main() -> rollblock::StoreResult<()> {
     let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
     let store = MhinStoreFacade::new(config)?;
 
-    let key = [1, 2, 3, 4, 5, 6, 7, 8];
+    let key: Key = [1, 2, 3, 4, 5, 6, 7, 8].into();
     store.set(1, vec![Operation { key, value: 42u64.into() }])?;
 
     let value = store.get(key)?;
@@ -30,6 +30,8 @@ fn main() -> rollblock::StoreResult<()> {
 }
 ```
 
+> The remote protocol advertises the compile-time key width during the handshake; clients compiled with a different width abort early.
+
 ---
 
 ## 1. MhinStoreFacade — Basic Key-Value Store
@@ -38,14 +40,14 @@ The simplest facade for batch operations at block granularity.
 
 ```rust
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
-use rollblock::types::{Operation, Value};
+use rollblock::types::{Operation, StoreKey as Key, Value};
 
 fn main() -> rollblock::StoreResult<()> {
     let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
     let store = MhinStoreFacade::new(config)?;
 
-    let key_a = [0xAA; 8];
-    let key_b = [0xBB; 8];
+    let key_a: Key = [0xAA; Key::BYTES].into();
+    let key_b: Key = [0xBB; Key::BYTES].into();
 
     // Block 1: insert two keys
     store.set(1, vec![
@@ -90,13 +92,13 @@ Buffer operations before committing. Intermediate reads reflect pending changes.
 
 ```rust
 use rollblock::{MhinStoreBlockFacade, StoreConfig};
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 
 fn main() -> rollblock::StoreResult<()> {
     let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
     let store = MhinStoreBlockFacade::new(config)?;
 
-    let key = [0x01; 8];
+    let key: Key = [0x01; Key::BYTES].into();
 
     // Start staging block 10
     store.start_block(10)?;
@@ -139,7 +141,7 @@ use std::time::Duration;
 use rollblock::{MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade};
 use rollblock::client::{ClientConfig, RemoteStoreClient};
 use rollblock::net::BasicAuthConfig;
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Server side ──────────────────────────────────────────────────────────
@@ -152,7 +154,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_remote_server(server_settings);
 
     let store = MhinStoreFacade::new(config)?;
-    store.set(1, vec![Operation { key: [0xAB; 8], value: 1337u64.into() }])?;
+    store.set(
+        1,
+        vec![Operation {
+            key: Key::from([0xAB; Key::BYTES]),
+            value: 1337u64.into(),
+        }],
+    )?;
 
     // ── Client side ──────────────────────────────────────────────────────────
     let client_cfg = ClientConfig::new(
@@ -164,11 +172,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = RemoteStoreClient::connect("127.0.0.1:9443", client_cfg)?;
 
     // Single read
-    let value = client.get_one([0xAB; 8])?;
+    let value = client.get_one(Key::from([0xAB; Key::BYTES]))?;
     println!("Remote value: {} bytes", value.len());
 
     // Batch read (up to 255 keys)
-    let values = client.get(&[[0xAB; 8], [0x00; 8]])?;
+    let values = client.get(&[Key::from([0xAB; Key::BYTES]), Key::from([0x00; Key::BYTES])])?;
     println!("Got {} values", values.len());
 
     client.close()?;

@@ -5,9 +5,13 @@
 //!
 //! Run with: cargo run --example parallel_processing --release
 
-use rollblock::types::{Operation, Value};
+use rollblock::types::{Operation, StoreKey as Key, Value};
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
 use std::time::Instant;
+
+fn key_from_u64(value: u64) -> Key {
+    Key::from_u64_le(value)
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("⚡ Parallel Processing Performance Example\n");
@@ -35,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut operations = Vec::with_capacity(100_000);
     for i in 0..100_000u64 {
-        let key = i.to_le_bytes();
+        let key = key_from_u64(i);
         operations.push(Operation {
             key,
             value: i.into(),
@@ -57,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut found_count = 0;
     for i in (0..10_000u64).step_by(10) {
-        let key = i.to_le_bytes();
+        let key = key_from_u64(i);
         if store.get(key)?.is_set() {
             found_count += 1;
         }
@@ -77,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut operations = Vec::with_capacity(50_000);
     for i in (0..100_000u64).step_by(2) {
-        let key = i.to_le_bytes();
+        let key = key_from_u64(i);
         operations.push(Operation {
             key,
             value: (i * 10).into(), // Multiply value by 10
@@ -99,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut operations = Vec::with_capacity(30_000);
     for i in (0..60_000u64).step_by(2) {
-        let key = i.to_le_bytes();
+        let key = key_from_u64(i);
         operations.push(Operation {
             key,
             value: Value::empty(),
@@ -129,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📊 Final verification:");
     let mut sample_keys = 0;
     for i in (0..100_000u64).step_by(10_000) {
-        let key = i.to_le_bytes();
+        let key = key_from_u64(i);
         if store.get(key)?.is_set() {
             sample_keys += 1;
         }

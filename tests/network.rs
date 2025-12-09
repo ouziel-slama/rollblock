@@ -1,11 +1,12 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::io::{BufRead, BufReader, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rcgen::generate_simple_self_signed;
 use rollblock::client::{ClientConfig, ClientError, RemoteStoreClient};
 use rollblock::net::BasicAuthConfig;
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::{MhinStoreError, MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade};
 
 fn bytes_to_u64_le(bytes: &[u8]) -> u64 {
@@ -44,8 +45,8 @@ fn network_round_trip_tls_auto_server() {
     let temp = tempfile::tempdir_in(&workspace).unwrap();
     let data_dir = temp.path().join("store");
 
-    let key_a = [1u8; 8];
-    let key_b = [2u8; 8];
+    let key_a: Key = [1u8; Key::BYTES].into();
+    let key_b: Key = [2u8; Key::BYTES].into();
     let (cert_path, key_path) = generate_tls_material(temp.path());
     let port = allocate_port();
     let auth = BasicAuthConfig::new("tester", "secret");
@@ -95,7 +96,7 @@ fn network_rejects_bad_credentials() {
     let temp = tempfile::tempdir_in(&workspace).unwrap();
     let data_dir = temp.path().join("store");
 
-    let key = [9u8; 8];
+    let key: Key = [9u8; Key::BYTES].into();
     let (cert_path, key_path) = generate_tls_material(temp.path());
     let port = allocate_port();
     let bad_auth = BasicAuthConfig::new("user", "wrong-pass");
@@ -137,7 +138,7 @@ fn network_round_trip_without_tls() {
     let temp = tempfile::tempdir_in(&workspace).unwrap();
     let data_dir = temp.path().join("store");
 
-    let key = [3u8; 8];
+    let key: Key = [3u8; Key::BYTES].into();
     let port = allocate_port();
     let auth = BasicAuthConfig::new("tester", "secret");
 
@@ -169,6 +170,41 @@ fn network_round_trip_without_tls() {
 
     assert_eq!(bytes_to_u64_le(&value), 123);
     store.close().unwrap();
+}
+
+#[test]
+fn network_rejects_key_width_mismatch() {
+    let port = allocate_port();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+
+    let listener = TcpListener::bind(addr).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut header = Vec::new();
+        reader.read_until(b'\n', &mut header).unwrap();
+
+        let bad_width = (Key::BYTES as u16) + 1;
+        let mut payload = [0u8; 3];
+        payload[0] = 0; // AUTH_READY
+        payload[1..].copy_from_slice(&bad_width.to_le_bytes());
+        stream.write_all(&payload).unwrap();
+        stream.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    });
+
+    let client_config = ClientConfig::without_tls(BasicAuthConfig::new("user", "pass"))
+        .with_timeout(Duration::from_secs(1));
+    let err = RemoteStoreClient::connect(addr, client_config).unwrap_err();
+    match err {
+        ClientError::KeyWidthMismatch { server, client } => {
+            assert_eq!(server, Key::BYTES + 1);
+            assert_eq!(client, Key::BYTES);
+        }
+        other => panic!("expected KeyWidthMismatch, got {other}"),
+    }
+
+    server.join().unwrap();
 }
 
 #[test]

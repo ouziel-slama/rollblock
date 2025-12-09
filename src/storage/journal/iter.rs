@@ -13,15 +13,17 @@ pub struct JournalIter {
     position: usize,
     chunk_dir: PathBuf,
     current_file: Option<(u32, File)>,
+    key_bytes: usize,
 }
 
 impl JournalIter {
-    pub(crate) fn new(chunk_dir: PathBuf, metas: Vec<JournalMeta>) -> Self {
+    pub(crate) fn new(chunk_dir: PathBuf, metas: Vec<JournalMeta>, key_bytes: usize) -> Self {
         Self {
             metas,
             position: 0,
             chunk_dir,
             current_file: None,
+            key_bytes,
         }
     }
 
@@ -33,8 +35,9 @@ impl JournalIter {
         let meta = self.metas[self.position].clone();
         self.position += 1;
 
+        let key_bytes = self.key_bytes;
         match self.file_for_chunk(meta.chunk_id) {
-            Ok(file) => Some(read_journal_block(file, &meta)),
+            Ok(file) => Some(read_journal_block(file, &meta, key_bytes)),
             Err(err) => Some(Err(err)),
         }
     }

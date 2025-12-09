@@ -9,7 +9,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use crate::error::{MhinStoreError, StoreResult};
 use crate::storage::fs::sync_directory;
 use crate::types::{
-    BlockId, BlockUndo, JournalMeta, Operation, ShardUndo, UndoEntry, UndoOp, Value,
+    BlockId, BlockUndo, JournalMeta, Operation, ShardUndo, StoreKey, UndoEntry, UndoOp, Value,
 };
 
 use super::format::{
@@ -28,6 +28,7 @@ pub struct FileBlockJournal {
     index_path: PathBuf,
     write_lock: Arc<Mutex<()>>,
     options: JournalOptions,
+    key_bytes: usize,
     /// Sync policy stored separately for runtime modification.
     sync_policy: RwLock<SyncPolicy>,
     /// Lazily opened journal file handle shared across appends.
@@ -74,6 +75,7 @@ impl FileBlockJournal {
             index_path,
             write_lock: Arc::new(Mutex::new(())),
             options,
+            key_bytes: StoreKey::BYTES,
             sync_policy,
             journal_state: Arc::new(Mutex::new(None)),
         })
@@ -81,12 +83,12 @@ impl FileBlockJournal {
 
     fn minimum_entry_size_bytes(options: &JournalOptions) -> StoreResult<u64> {
         const MIN_BLOCK: BlockId = 0;
-        const MIN_KEY: [u8; 8] = [0u8; 8];
+        let min_key = StoreKey::new([0u8; StoreKey::BYTES]);
 
         // Ensure the minimum chunk size can accommodate at least one operation plus its undo.
         let minimal_value = Value::from_le_bytes([0u8; 8]);
         let minimal_operations = [Operation {
-            key: MIN_KEY,
+            key: min_key,
             value: minimal_value.clone(),
         }];
         let minimal_undo = BlockUndo {
@@ -94,7 +96,7 @@ impl FileBlockJournal {
             shard_undos: vec![ShardUndo {
                 shard_index: 0,
                 entries: vec![UndoEntry {
-                    key: MIN_KEY,
+                    key: min_key,
                     previous: Some(minimal_value),
                     op: UndoOp::Updated,
                 }],
@@ -260,7 +262,8 @@ impl FileBlockJournal {
 
     fn open_existing_chunk(&self, chunk_id: u32) -> StoreResult<JournalFileState> {
         let path = chunk_file_path(&self.root_dir, chunk_id);
-        let current_offset = super::maintenance::repair_chunk_tail(&path, chunk_id)?;
+        let current_offset =
+            super::maintenance::repair_chunk_tail(&path, chunk_id, self.key_bytes)?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -430,6 +433,7 @@ impl BlockJournal for FileBlockJournal {
                 serialized.len() as u64,
                 checksum,
                 flags,
+                self.key_bytes,
             );
 
             let bytes_required = JOURNAL_HEADER_SIZE as u64 + payload.len() as u64;
@@ -545,11 +549,15 @@ impl BlockJournal for FileBlockJournal {
             .filter(|meta| meta.block_height <= from && meta.block_height >= to)
             .collect();
 
-        Ok(JournalIter::new(self.root_dir.clone(), filtered))
+        Ok(JournalIter::new(
+            self.root_dir.clone(),
+            filtered,
+            self.key_bytes,
+        ))
     }
     fn read_entry(&self, meta: &JournalMeta) -> StoreResult<JournalBlock> {
         let mut file = self.open_chunk_for_read(meta.chunk_id)?;
-        read_journal_block(&mut file, meta)
+        read_journal_block(&mut file, meta, self.key_bytes)
     }
 
     fn list_entries(&self) -> StoreResult<Vec<JournalMeta>> {
@@ -575,7 +583,7 @@ impl BlockJournal for FileBlockJournal {
 
     fn scan_entries(&self) -> StoreResult<Vec<JournalMeta>> {
         let _guard = self.write_lock.lock();
-        super::maintenance::scan_entries(&self.root_dir)
+        super::maintenance::scan_entries(&self.root_dir, self.key_bytes)
     }
 
     fn plan_prune_chunks_ending_at_or_before(
@@ -700,12 +708,12 @@ mod tests {
         JOURNAL_HEADER_FLAG_NONE, JOURNAL_HEADER_SIZE,
     };
     use crate::storage::journal::maintenance;
-    use crate::types::{Operation, ShardUndo, UndoEntry, UndoOp, Value};
+    use crate::types::{Operation, ShardUndo, StoreKey, UndoEntry, UndoOp, Value};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
     use tempfile::tempdir_in;
 
-    fn sample_shard(shard_index: usize, key: [u8; 8], value: Value) -> ShardUndo {
+    fn sample_shard(shard_index: usize, key: StoreKey, value: Value) -> ShardUndo {
         ShardUndo {
             shard_index,
             entries: vec![UndoEntry {
@@ -718,7 +726,7 @@ mod tests {
 
     fn sample_operations(block: BlockId) -> Vec<Operation> {
         vec![Operation {
-            key: [block as u8; 8],
+            key: StoreKey::from([block as u8; StoreKey::BYTES]),
             value: block.into(),
         }]
     }
@@ -726,7 +734,11 @@ mod tests {
     fn sample_undo(block: BlockId) -> BlockUndo {
         BlockUndo {
             block_height: block,
-            shard_undos: vec![sample_shard(0, [1u8; 8], 42.into())],
+            shard_undos: vec![sample_shard(
+                0,
+                StoreKey::from([1u8; StoreKey::BYTES]),
+                42.into(),
+            )],
         }
     }
 
@@ -783,15 +795,15 @@ mod tests {
 
         let operations = vec![
             Operation {
-                key: [0x01; 8],
+                key: StoreKey::from([0x01; StoreKey::BYTES]),
                 value: Value::from_vec(vec![1, 2, 3, 4, 5]),
             },
             Operation {
-                key: [0x02; 8],
+                key: StoreKey::from([0x02; StoreKey::BYTES]),
                 value: Value::from_vec(large_value),
             },
             Operation {
-                key: [0x03; 8],
+                key: StoreKey::from([0x03; StoreKey::BYTES]),
                 value: Value::empty(),
             },
         ];
@@ -1287,8 +1299,15 @@ mod tests {
         {
             let mut file = OpenOptions::new().write(true).open(&chunk_path).unwrap();
             file.seek(SeekFrom::Start(first_end)).unwrap();
-            let bogus_header =
-                JournalHeader::new(block_one + 1, 0, 0, 0, 0, JOURNAL_HEADER_FLAG_NONE);
+            let bogus_header = JournalHeader::new(
+                block_one + 1,
+                0,
+                0,
+                0,
+                0,
+                JOURNAL_HEADER_FLAG_NONE,
+                StoreKey::BYTES,
+            );
             let header_bytes = bogus_header.to_bytes();
             file.write_all(&header_bytes[..JOURNAL_HEADER_SIZE / 2])
                 .unwrap();
@@ -1355,6 +1374,7 @@ mod tests {
             serialized.len() as u64,
             checksum,
             JOURNAL_FLAG_UNCOMPRESSED,
+            StoreKey::BYTES,
         );
         let header_bytes = header.to_bytes();
 
@@ -1375,7 +1395,7 @@ mod tests {
 
         drop(journal);
 
-        let scanned = maintenance::scan_entries(tmp.path()).unwrap();
+        let scanned = maintenance::scan_entries(tmp.path(), StoreKey::BYTES).unwrap();
         assert_eq!(
             scanned.len(),
             1,

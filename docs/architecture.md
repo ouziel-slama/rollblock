@@ -42,17 +42,17 @@ Rollblock is a **block-oriented, rollbackable key-value store** optimized for hi
 
 | Type | Size | Description |
 |------|------|-------------|
-| `Key` | 8 bytes | Fixed-size identifier. Used directly for shard routing. |
+| `Key` | Compile-time width (≥ 8 bytes) | Fixed-size identifier, persisted in metadata. Client/server builds must agree on the width. |
 | `Value` | 0–65,535 bytes | Arbitrary payload. Empty = deletion marker. |
 | `BlockId` | u64 | Block height. Strictly increasing, caller-controlled. |
 | `Operation` | Key + Value | A single mutation within a block. |
 
 ### Sharding Strategy
 
-Keys are interpreted as little-endian `u64` and routed via:
+Keys are routed using a fast hash of their raw bytes:
 
 ```
-shard_index = u64::from_le_bytes(key) % shard_count
+shard_index = xxh3_64(key_bytes) % shard_count
 ```
 
 No additional hashing—your key bytes directly control shard placement. Design keys for even distribution.
@@ -217,7 +217,7 @@ store.get(key)
     ▼
 StateEngine.lookup(key)
     │
-    ├─ shard_index = u64::from_le_bytes(key) % shard_count
+    ├─ shard_index = xxh3_64(key_bytes) % shard_count
     │
     └─ shard.get(key)  ◀── RwLock::read(), O(1) lookup
            │
@@ -249,14 +249,15 @@ The `applied_block` may be ahead of `durable_block`. On crash, recovery replays 
 Each journal entry stores operations and undo data for one block:
 
 ```
-┌──────────────────────── HEADER (40 bytes) ────────────────────────┐
-│ magic(4) │ version(2) │ flags(2) │ block_height(8) │ entry_count(4)│
-│ compressed_len(8) │ uncompressed_len(8) │ checksum(4)             │
+┌──────────────────────── HEADER (42 bytes) ────────────────────────┐
+│ magic(4) │ version(2) │ flags(2) │ key_bytes(2) │ block_height(8) │
+│ entry_count(4) │ compressed_len(8) │ uncompressed_len(8)          │
+│ checksum(4)                                                       │
 └───────────────────────────────────────────────────────────────────┘
 ┌──────────────────────── PAYLOAD (zstd compressed) ────────────────┐
 │ bincode-encoded BlockUndo                                         │
 │ + operation stream:                                               │
-│   [key(8)][len(u16)][value bytes...] × entry_count                │
+│   [key(key_bytes)][len(u16)][value bytes...] × entry_count        │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -270,13 +271,13 @@ Full state export for fast recovery:
 
 ```
 ┌──────────────────────── HEADER (32 bytes) ────────────────────────┐
-│ magic(4) "MHIS" │ version(2) │ reserved(2) │ block_height(8)      │
+│ magic(4) "MHIS" │ version(2) │ key_bytes(2) │ block_height(8)     │
 │ shard_count(8) │ checksum(8)                                      │
 └───────────────────────────────────────────────────────────────────┘
 ┌──────────────────────── SHARD DATA (per shard) ───────────────────┐
 │ entry_count(u64)                                                  │
 │ repeat entry_count times:                                         │
-│   [key(8)][len(u16)][value bytes...]                              │
+│   [key(key_bytes)][len(u16)][value bytes...]                      │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -409,15 +410,23 @@ data_dir/
 ## Quick Reference
 
 ```rust
+use rollblock::types::StoreKey as Key;
+
 // Create store
 let config = StoreConfig::new("./data", 4, 10_000, 1, false)?;
 let store = MhinStoreFacade::new(config)?;
 
 // Write a block
-store.set(1, vec![Operation { key: [1u8; 8], value: 42.into() }])?;
+store.set(
+    1,
+    vec![Operation {
+        key: [1u8; Key::BYTES].into(),
+        value: 42.into(),
+    }],
+)?;
 
 // Read
-let value = store.get([1u8; 8])?;
+let value = store.get([1u8; Key::BYTES].into())?;
 
 // Rollback
 store.rollback(0)?;

@@ -5,7 +5,7 @@
 
 use heed::types::Bytes;
 use heed::{EnvFlags, EnvOpenOptions};
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::Value;
 use rollblock::{DurabilityMode, MhinStoreFacade, StoreConfig, StoreFacade};
 use std::env;
@@ -29,6 +29,10 @@ const LMDB_ENTRY_BYTES_ESTIMATE: usize = 128;
 const REFERENCE_SCENARIO_NAME: &str = "Async relaxed, multi-threads";
 const LMDB_SCENARIO_NAME: &str = "LMDB baseline";
 const BYTES_PER_GIB: f64 = (1u64 << 30) as f64;
+
+fn key_from_u64(value: u64) -> Key {
+    Key::from_u64_le(value)
+}
 
 fn format_with_separator<T>(value: T) -> String
 where
@@ -327,7 +331,7 @@ fn run_scenario(scenario: &Scenario, total_blocks: u64) -> Result<Duration, Box<
         let mut operations = Vec::with_capacity(TOTAL_OPS_PER_BLOCK);
 
         for _ in 0..INSERT_PER_BLOCK {
-            let key = next_key.to_le_bytes();
+            let key = key_from_u64(next_key);
             operations.push(Operation {
                 key,
                 value: next_key.into(),
@@ -340,7 +344,7 @@ fn run_scenario(scenario: &Scenario, total_blocks: u64) -> Result<Duration, Box<
                 delete_cursor < next_key,
                 "attempted to delete more keys than inserted"
             );
-            let key = delete_cursor.to_le_bytes();
+            let key = key_from_u64(delete_cursor);
             delete_cursor += 1;
             operations.push(Operation {
                 key,

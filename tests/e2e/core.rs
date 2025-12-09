@@ -1,4 +1,4 @@
-use rollblock::types::{Operation, MAX_VALUE_BYTES};
+use rollblock::types::{Operation, StoreKey as Key, MAX_VALUE_BYTES};
 use rollblock::Value;
 use rollblock::{StoreFacade, StoreResult};
 
@@ -15,7 +15,7 @@ fn e2e_basic_lifecycle() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let key = [1u8; 8];
+    let key: Key = [1u8; Key::BYTES].into();
 
     let current = store.current_block()?;
     let applied = store.applied_block()?;
@@ -100,7 +100,7 @@ fn e2e_empty_value_auto_delete() -> StoreResult<()> {
     let harness = StoreHarness::builder("empty-value-auto-delete").build();
     let store = harness.open()?;
 
-    let key = [2u8; 8];
+    let key: Key = [2u8; Key::BYTES].into();
 
     apply_block(
         &store,
@@ -144,10 +144,10 @@ fn e2e_sparse_blocks() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let key_a = [10u8; 8];
-    let key_b = [11u8; 8];
-    let key_c = [12u8; 8];
-    let key_d = [13u8; 8];
+    let key_a: Key = [10u8; Key::BYTES].into();
+    let key_b: Key = [11u8; Key::BYTES].into();
+    let key_c: Key = [12u8; Key::BYTES].into();
+    let key_d: Key = [13u8; Key::BYTES].into();
 
     apply_block(
         &store,
@@ -258,7 +258,7 @@ fn get_returns_empty_vec_for_missing_keys() -> StoreResult<()> {
 
     let harness = StoreHarness::builder("missing-key-empty-value").build();
     let store = harness.open()?;
-    let missing = store.get([0u8; 8])?;
+    let missing = store.get([0u8; Key::BYTES].into())?;
     assert!(missing.is_delete());
     assert_eq!(missing.len(), 0);
     store.close()?;

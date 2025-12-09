@@ -10,7 +10,7 @@ use rollblock::error::MhinStoreError;
 use rollblock::orchestrator::{BlockOrchestrator, DefaultBlockOrchestrator};
 use rollblock::state_engine::ShardedStateEngine;
 use rollblock::state_shard::{RawTableShard, StateShard};
-use rollblock::types::{Key, ShardOp, ShardStats, ShardUndo, Value, ValueBuf};
+use rollblock::types::{ShardOp, ShardStats, ShardUndo, StoreKey as Key, Value, ValueBuf};
 use rollblock::FileBlockJournal;
 use rollblock::MetadataStore;
 
@@ -99,8 +99,8 @@ fn apply_and_revert_flow() {
         synchronous_settings(),
     )
     .unwrap();
-    let key_a = [1u8; 8];
-    let key_b = [2u8; 8];
+    let key_a: Key = [1u8; Key::BYTES].into();
+    let key_b: Key = [2u8; Key::BYTES].into();
 
     orchestrator
         .apply_operations(1, vec![operation(key_a, 10)])
@@ -148,7 +148,7 @@ fn rollback_discards_unsynced_relaxed_blocks() {
     orchestrator.set_sync_policy(SyncPolicy::every_n_blocks(10));
     orchestrator.set_metadata_sync_interval(10).unwrap();
 
-    let key = [0x11u8; 8];
+    let key: Key = [0x11u8; Key::BYTES].into();
     orchestrator
         .apply_operations(1, vec![operation(key, 10)])
         .unwrap();
@@ -212,7 +212,7 @@ fn reader_gate_blocks_fetch_during_pending_apply() {
         .unwrap(),
     );
 
-    let key = [1u8; 8];
+    let key: Key = [1u8; Key::BYTES].into();
     orchestrator
         .apply_operations(1, vec![operation(key, 11)])
         .unwrap();
@@ -297,17 +297,9 @@ fn parallel_apply_with_rayon() {
 
     // Create many operations that will be distributed across shards
     let mut ops = Vec::new();
+    let make_key = |i: u32| Key::from_prefix(i.to_le_bytes());
     for i in 0..1000 {
-        let key = [
-            i as u8,
-            (i >> 8) as u8,
-            (i >> 16) as u8,
-            (i >> 24) as u8,
-            0,
-            0,
-            0,
-            0,
-        ];
+        let key = make_key(i);
         ops.push(operation(key, i as u64));
     }
 
@@ -316,39 +308,21 @@ fn parallel_apply_with_rayon() {
 
     // Verify some keys were set
     for i in [0, 100, 500, 999] {
-        let key = [
-            i as u8,
-            (i >> 8) as u8,
-            (i >> 16) as u8,
-            (i >> 24) as u8,
-            0,
-            0,
-            0,
-            0,
-        ];
+        let key = make_key(i);
         assert_eq!(orchestrator.fetch(key).unwrap(), i as u64);
     }
 
     // Update operations
     let mut update_ops = Vec::new();
     for i in 0..500 {
-        let key = [
-            i as u8,
-            (i >> 8) as u8,
-            (i >> 16) as u8,
-            (i >> 24) as u8,
-            0,
-            0,
-            0,
-            0,
-        ];
+        let key = make_key(i);
         update_ops.push(operation(key, i as u64 + 1000));
     }
 
     orchestrator.apply_operations(2, update_ops).unwrap();
 
     // Verify updates
-    let key_0 = [0, 0, 0, 0, 0, 0, 0, 0];
+    let key_0: Key = [0u8; Key::BYTES].into();
     assert_eq!(orchestrator.fetch(key_0).unwrap(), 1000);
 
     // Rollback and verify
@@ -395,7 +369,7 @@ fn orchestrator_supports_thread_pools() {
     )
     .unwrap();
 
-    let key_a = [1u8; 8];
+    let key_a: Key = [1u8; Key::BYTES].into();
     orchestrator
         .apply_operations(1, vec![operation(key_a, 42)])
         .unwrap();
@@ -427,8 +401,8 @@ fn empty_blocks_and_sparse_block_heights() {
     )
     .unwrap();
 
-    let key_a = [1u8; 8];
-    let key_b = [2u8; 8];
+    let key_a: Key = [1u8; Key::BYTES].into();
+    let key_b: Key = [2u8; Key::BYTES].into();
 
     // Block 100: Set key_a
     orchestrator
@@ -531,7 +505,7 @@ fn block_height_must_be_increasing() {
     )
     .unwrap();
 
-    let key_a = [1u8; 8];
+    let key_a: Key = [1u8; Key::BYTES].into();
 
     // Block 100: Set key_a
     orchestrator
@@ -583,7 +557,7 @@ fn allows_genesis_block_zero_once() {
     )
     .unwrap();
 
-    let key = [7u8; 8];
+    let key: Key = [7u8; Key::BYTES].into();
     orchestrator
         .apply_operations(0, vec![operation(key, 99)])
         .expect("genesis block 0 should be accepted");
@@ -633,7 +607,7 @@ fn empty_value_sets_delete_keys() {
     )
     .unwrap();
 
-    let key_a = [1u8; 8];
+    let key_a: Key = [1u8; Key::BYTES].into();
 
     orchestrator
         .apply_operations(1, vec![operation(key_a, 10)])

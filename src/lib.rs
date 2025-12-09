@@ -16,6 +16,7 @@
 //! ```ignore
 //! use rollblock::*;
 //! use rollblock::types::Operation;
+//! use rollblock::types::StoreKey as Key;
 //!
 //! // Create configuration
 //! let config = StoreConfig::new(
@@ -32,13 +33,13 @@
 //! // Apply operations
 //! let ops = vec![
 //!     Operation {
-//!         key: [1, 2, 3, 4, 5, 6, 7, 8],
+//!         key: Key::from([1, 2, 3, 4, 5, 6, 7, 8]),
 //!         value: b"answer".to_vec().into(),
 //!     },
 //! ];
 //! store.set(1, ops)?;
 //! // Read value
-//! let key = [1, 2, 3, 4, 5, 6, 7, 8];
+//! let key = Key::from([1, 2, 3, 4, 5, 6, 7, 8]);
 //! let value = store.get(key)?;
 //! if value.is_delete() {
 //!     println!("Key not found");

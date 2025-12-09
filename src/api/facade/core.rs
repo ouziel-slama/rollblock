@@ -12,7 +12,7 @@ use crate::snapshot::MmapSnapshotter;
 use crate::state_engine::ShardedStateEngine;
 use crate::state_shard::{RawTableShard, StateShard};
 use crate::store_lock::StoreLockGuard;
-use crate::types::{BlockId, Key, Operation, Value};
+use crate::types::{BlockId, Operation, StoreKey as Key, Value};
 use parking_lot::RwLock;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::oneshot;
@@ -335,6 +335,11 @@ impl MhinStoreFacade {
     /// This provides access to the orchestrator for advanced use cases.
     pub fn orchestrator(&self) -> &Arc<dyn BlockOrchestrator> {
         &self.orchestrator
+    }
+
+    /// Returns the configured key width in bytes.
+    pub fn key_bytes(&self) -> usize {
+        Key::BYTES
     }
 
     /// Returns the store metrics if available.

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::error::{MhinStoreError, StoreResult};
 use crate::state::shard::StateShard;
 use crate::types::{
-    BlockDelta, BlockId, Key, Operation, ShardDelta, ShardOp, UndoEntry, UndoOp, Value, ValueBuf,
+    BlockDelta, BlockId, Operation, ShardDelta, ShardOp, StoreKey as Key, UndoEntry, UndoOp, Value,
+    ValueBuf,
 };
 
 pub(crate) fn plan_block_delta(

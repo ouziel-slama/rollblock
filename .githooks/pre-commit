@@ -6,9 +6,12 @@ set -euo pipefail
 echo "Running cargo fmt --all --check..."
 cargo fmt --all --check
 
-echo "Running cargo clippy --workspace --all-targets --all-features..."
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+echo "Running cargo clippy --workspace --all-targets..."
+cargo clippy --workspace --all-targets -- -D warnings
 
-echo "Running cargo test --workspace --all-features..."
-cargo test --workspace --all-features
+echo "Running cargo test --workspace..."
+cargo test --workspace
 
+# Ensure dynamic key width compiles and tests at 32 bytes as well.
+echo "Running cargo test with ROLLBLOCK_KEY_BYTES=32..."
+ROLLBLOCK_KEY_BYTES=32 cargo test --workspace

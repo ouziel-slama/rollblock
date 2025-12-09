@@ -2,7 +2,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::{Duration, Instant};
 
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::{
     BlockJournal, DurabilityMode, FileBlockJournal, MhinStoreBlockFacade, MhinStoreError,
     StoreFacade, StoreResult,
@@ -24,7 +24,7 @@ fn e2e_checksum_corruption() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let key = [0xD1u8; 8];
+    let key: Key = [0xD1u8; Key::BYTES].into();
     apply_block(
         &store,
         1,
@@ -88,7 +88,7 @@ fn e2e_large_batch_bounds() -> StoreResult<()> {
     let operation_count: usize = 5_000;
     let mut operations = Vec::with_capacity(operation_count);
     for i in 0..operation_count {
-        let key = (i as u64).to_le_bytes();
+        let key = Key::from_u64_le(i as u64);
         operations.push(Operation {
             key,
             // Zero-value operations are treated as deletes; offset by 1 to ensure insertion.
@@ -128,7 +128,7 @@ fn e2e_block_facade_end_block_failure_is_fatal() -> StoreResult<()> {
     let harness = StoreHarness::builder("block-facade-fatal").build();
     let store = harness.open()?;
     let block_facade = MhinStoreBlockFacade::from_facade(store.clone());
-    let key = [0xEFu8; 8];
+    let key: Key = [0xEFu8; Key::BYTES].into();
 
     block_facade.start_block(1)?;
     block_facade.set(Operation {

@@ -604,14 +604,15 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::reversed_empty_ranges)]
     fn journal_offsets_invalid_range_errors() {
         let workspace_tmp = std::env::current_dir().unwrap().join("target/testdata");
         fs::create_dir_all(&workspace_tmp).unwrap();
         let tmp = tempdir_in(&workspace_tmp).unwrap();
         let store = LmdbMetadataStore::new(tmp.path()).unwrap();
 
-        let err = store.get_journal_offsets(5..=3).unwrap_err();
+        let err = store
+            .get_journal_offsets(std::ops::RangeInclusive::new(5, 3))
+            .unwrap_err();
         match err {
             MhinStoreError::InvalidBlockRange { start, end } => {
                 assert_eq!(start, 5);

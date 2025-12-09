@@ -32,13 +32,35 @@ Built for blockchain nodes, event sourcing, game state, and any system that need
 
 ---
 
+## Install
+
+Add rollblock to your `Cargo.toml`:
+
+```toml
+[dependencies]
+rollblock = "0.3"
+```
+
+To use a specific key size, enable a feature:
+
+```toml
+[dependencies]
+rollblock = { version = "0.3", features = ["key-32"] }
+```
+
+Available features: `key-8` through `key-64` (one per byte).
+
+For custom sizes, set `ROLLBLOCK_KEY_BYTES=64 cargo build` (any value from 8 to 64).
+
+---
+
 ## Quick Examples
 
 ### Server: Read & Write Operations
 
 ```rust
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
-use rollblock::types::{Operation, Value};
+use rollblock::types::{Operation, StoreKey as Key, Value};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a new store
@@ -52,8 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = MhinStoreFacade::new(config)?;
 
     // Write a block with multiple operations
-    let key_alice = [0x01, 0, 0, 0, 0, 0, 0, 0];
-    let key_bob   = [0x02, 0, 0, 0, 0, 0, 0, 0];
+    let key_alice: Key = [0x01, 0, 0, 0, 0, 0, 0, 0].into();
+    let key_bob: Key   = [0x02, 0, 0, 0, 0, 0, 0, 0].into();
 
     store.set(1, vec![
         Operation { key: key_alice, value: Value::from_slice(b"balance:1000") },
@@ -94,6 +116,7 @@ Rollblock includes an embedded TCP server for read-only remote access. The clien
 use std::time::Duration;
 use rollblock::client::{ClientConfig, RemoteStoreClient};
 use rollblock::net::BasicAuthConfig;
+use rollblock::types::StoreKey as Key;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Connect to a running Rollblock server
@@ -104,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = RemoteStoreClient::connect("127.0.0.1:9443", config)?;
 
     // Fetch a single key
-    let key = [0x01, 0, 0, 0, 0, 0, 0, 0];
+    let key: Key = Key::from_prefix([0x01, 0, 0, 0, 0, 0, 0, 0]);
     let value = client.get_one(key)?;
 
     if value.is_empty() {
@@ -114,7 +137,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Batch fetch multiple keys
-    let keys = [[0x01; 8], [0x02; 8], [0x03; 8]];
+    let keys: Vec<Key> = vec![
+        Key::from_prefix([0x01; 8]),
+        Key::from_prefix([0x02; 8]),
+        Key::from_prefix([0x03; 8]),
+    ];
     let values = client.get(&keys)?;
 
     for (i, v) in values.iter().enumerate() {
@@ -166,18 +193,46 @@ let config = config.with_durability_mode(DurabilityMode::Async {
 let config = config.with_durability_mode(DurabilityMode::Synchronous);
 ```
 
+### Key Size Configuration
+
+The key size is fixed at compile time. Two methods are available:
+
+**Method 1: Cargo feature (recommended for libraries)**
+
+```toml
+# In your Cargo.toml
+[dependencies]
+rollblock = { version = "0.3", features = ["key-32"] }
+```
+
+Available features: `key-8` through `key-64` (one per byte).
+
+**Method 2: Environment variable (for custom sizes)**
+
+```bash
+ROLLBLOCK_KEY_BYTES=64 cargo build
+```
+
+Any value between 8 and 64 is accepted.
+
+**Priority:** Feature > Environment variable > Default (8 bytes).
+
+> ⚠️ Only one `key-XX` feature can be active at a time. Server and client must use the same key size.
+
 ---
 
 ## Data Model
 
 | Type | Definition | Notes |
 |------|------------|-------|
-| `Key` | `[u8; 8]` | Fixed 8-byte identifier. Hash your keys upstream if needed. |
+| `Key` | `Key<const N>` (default `N = 8`) | Fixed-size identifier; width is fixed at compile time for a given build. |
 | `Value` | `Vec<u8>` | Up to 65,535 bytes. An empty value represents a deletion. |
 | `BlockId` | `u64` | Block height. Must be strictly increasing. |
 | `Operation` | `{ key, value }` | A single mutation within a block. |
 
-Keys are sharded using their raw bytes interpreted as little-endian `u64`: `shard = key_as_u64 % shard_count`. Design your key space accordingly for even distribution.
+Keys are sharded using `xxh3` over the key bytes: `shard = xxh3_64(key) % shard_count`. Design your key space accordingly for even distribution.
+
+> **Choosing the key width:** Use a Cargo feature (`key-8` through `key-64`) or set `ROLLBLOCK_KEY_BYTES` at build time. Both server and client builds must use the same width and data directories must be recreated after changing it. See [Key Size Configuration](#key-size-configuration) below.
 
 ---
 
@@ -190,7 +245,7 @@ Rollblock makes deliberate trade-offs. Know them before you commit:
 | **Full in-RAM** | Your dataset must fit in memory. OS swap will kill performance. |
 | **Single writer** | Only one process can open a data directory at a time. |
 | **Read-only clients** | The remote protocol only supports `GET` operations. All writes go through the primary. |
-| **Fixed key size** | Keys are exactly 8 bytes. Hash or truncate larger identifiers. |
+| **Fixed key size per deployment** | Key width is a compile-time constant (8-64 bytes). Changing it requires rebuilding the client/server and recreating data. The remote protocol advertises the width during handshake. |
 | **Value size cap** | Maximum 65,535 bytes per value. |
 
 ---

@@ -755,7 +755,7 @@ mod facade_tests {
 
     fn sample_operation(value: u64) -> Operation {
         Operation {
-            key: [value as u8; 8],
+            key: Key::from([value as u8; Key::BYTES]),
             value: value.into(),
         }
     }
@@ -878,7 +878,7 @@ mod facade_tests {
         let config = test_store_config(&data_dir, 4, 32, 1);
         let facade = MhinStoreFacade::new(config).expect("facade should initialize");
 
-        let key = [42u8; 8];
+        let key = [42u8; Key::BYTES].into();
         facade
             .set(
                 1,
@@ -931,8 +931,8 @@ mod facade_tests {
         let config = test_store_config(&data_dir, 8, 64, 4);
 
         let facade = MhinStoreFacade::new(config).expect("parallel facade should initialize");
-        let key_a = [1u8; 8];
-        let key_b = [2u8; 8];
+        let key_a = [1u8; Key::BYTES].into();
+        let key_b = [2u8; Key::BYTES].into();
 
         facade
             .set(
@@ -973,7 +973,7 @@ mod facade_tests {
                         value: 20.into(),
                     },
                     Operation {
-                        key: [7u8; 8],
+                        key: [7u8; Key::BYTES].into(),
                         value: 30.into(),
                     },
                 ],
@@ -991,7 +991,7 @@ mod facade_tests {
         );
         assert_eq!(facade.get(key_a).unwrap(), 12);
         assert_eq!(facade.get(key_b).unwrap(), 11);
-        assert_eq!(facade.get([7u8; 8]).unwrap(), 0);
+        assert_eq!(facade.get([7u8; Key::BYTES].into()).unwrap(), 0);
     }
 
     #[test]
@@ -1009,7 +1009,7 @@ mod facade_tests {
             .map(|i| Arc::new(RawTableShard::new(i, 4)) as Arc<dyn StateShard>)
             .collect();
 
-        let key = [1u8; 8];
+        let key = [1u8; Key::BYTES].into();
         shards[0].import_data(vec![(key, ValueBuf::from(Value::from(42u64)))]);
         let valid_snapshot_path = snapshotter.create_snapshot(10, &shards).unwrap();
         assert!(valid_snapshot_path.exists());
@@ -1179,7 +1179,7 @@ mod facade_tests {
             "set should forward to orchestrator"
         );
 
-        assert_eq!(facade.get([9u8; 8]).unwrap(), 9);
+        assert_eq!(facade.get([9u8; Key::BYTES].into()).unwrap(), 9);
         assert_eq!(
             orchestrator.lookups.lock().unwrap().len(),
             1,
@@ -1199,7 +1199,7 @@ mod facade_tests {
         let orchestrator = DummyOrchestrator::new();
         let base = MhinStoreFacade::from_orchestrator(orchestrator.clone());
         let facade = MhinStoreBlockFacade::from_facade(base);
-        let key = [42u8; 8];
+        let key = [42u8; Key::BYTES].into();
 
         facade.start_block(1).unwrap();
         facade
@@ -1238,7 +1238,7 @@ mod facade_tests {
         let orchestrator = DummyOrchestrator::new();
         let base = MhinStoreFacade::from_orchestrator(orchestrator.clone());
         let facade = MhinStoreBlockFacade::from_facade(base);
-        let key = [7u8; 8];
+        let key = [7u8; Key::BYTES].into();
 
         // Seed orchestrator with existing value through regular set.
         facade
@@ -1300,7 +1300,7 @@ mod facade_tests {
 
         let err = facade
             .set(Operation {
-                key: [0u8; 8],
+                key: [0u8; Key::BYTES].into(),
                 value: 1.into(),
             })
             .unwrap_err();
@@ -1336,7 +1336,7 @@ mod facade_tests {
         let orchestrator = FailingOrchestrator::new();
         let base = MhinStoreFacade::from_orchestrator(orchestrator);
         let facade = MhinStoreBlockFacade::from_facade(base);
-        let key = [5u8; 8];
+        let key = [5u8; Key::BYTES].into();
 
         facade.start_block(1).unwrap();
         facade
@@ -1384,7 +1384,7 @@ mod facade_tests {
         let data_dir = tmp.path().join("restartable-store");
 
         let config = test_store_config(&data_dir, 4, 32, 1);
-        let key = [0xABu8; 8];
+        let key = Key::from([0xABu8; Key::BYTES]);
 
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
@@ -1411,7 +1411,7 @@ mod facade_tests {
         let data_dir = tmp.path().join("crash-no-snapshot");
 
         let config = test_store_config(&data_dir, 2, 8, 1);
-        let key = [0xA5u8; 8];
+        let key = Key::from([0xA5u8; Key::BYTES]);
 
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
@@ -1453,7 +1453,7 @@ mod facade_tests {
         let data_dir = tmp.path().join("crash-with-snapshot");
 
         let config = test_store_config(&data_dir, 2, 8, 1);
-        let key = [0xB6u8; 8];
+        let key = Key::from([0xB6u8; Key::BYTES]);
 
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
@@ -1516,7 +1516,7 @@ mod facade_tests {
         let data_dir = tmp.path().join("rollback-prunes-snapshots");
 
         let config = test_store_config(&data_dir, 2, 8, 1);
-        let key = [0x11u8; 8];
+        let key = Key::from([0x11u8; Key::BYTES]);
         let snapshots_dir = data_dir.join("snapshots");
         let snapshot_path = |block: u64| snapshots_dir.join(format!("snapshot_{block:016x}.bin"));
 
@@ -1595,7 +1595,7 @@ mod facade_tests {
         let data_dir = tmp.path().join("rollback-persists");
 
         let config = test_store_config(&data_dir, 2, 16, 1);
-        let key = [0x33u8; 8];
+        let key = Key::from([0x33u8; Key::BYTES]);
 
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
@@ -1651,7 +1651,7 @@ mod facade_tests {
         let data_dir = tmp.path().join("truncated-tail");
 
         let config = test_store_config(&data_dir, 2, 16, 1);
-        let key = [0x44u8; 8];
+        let key = Key::from([0x44u8; Key::BYTES]);
 
         {
             let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
@@ -1811,8 +1811,8 @@ mod facade_tests {
         let orchestrator = DummyOrchestrator::new();
         {
             let mut state = orchestrator.state.lock().unwrap();
-            state.insert([1u8; 8], 11.into());
-            state.insert([3u8; 8], 33.into());
+            state.insert([1u8; Key::BYTES].into(), 11.into());
+            state.insert([3u8; Key::BYTES].into(), 33.into());
         }
 
         let facade = MhinStoreFacade::new_for_testing(
@@ -1821,7 +1821,11 @@ mod facade_tests {
             Arc::new(AtomicUsize::new(1)),
         );
 
-        let keys = [[1u8; 8], [2u8; 8], [3u8; 8]];
+        let keys = [
+            [1u8; Key::BYTES].into(),
+            [2u8; Key::BYTES].into(),
+            [3u8; Key::BYTES].into(),
+        ];
         let values = facade.multi_get(&keys).expect("multi_get should succeed");
 
         assert_eq!(values, vec![11, 0, 33]);
@@ -1835,7 +1839,7 @@ mod facade_tests {
                 .state
                 .lock()
                 .unwrap()
-                .insert([9u8; 8], 5.into());
+                .insert([9u8; Key::BYTES].into(), 5.into());
         }
 
         let inner = MhinStoreFacade::new_for_testing(
@@ -1848,19 +1852,19 @@ mod facade_tests {
         block_facade.start_block(1).expect("block should start");
         block_facade
             .set(Operation {
-                key: [1u8; 8],
+                key: [1u8; Key::BYTES].into(),
                 value: 42.into(),
             })
             .expect("staged insert should succeed");
         block_facade
             .set(Operation {
-                key: [9u8; 8],
+                key: [9u8; Key::BYTES].into(),
                 value: Value::empty(),
             })
             .expect("staged delete should succeed");
 
         let values = block_facade
-            .multi_get(&[[1u8; 8], [9u8; 8]])
+            .multi_get(&[[1u8; Key::BYTES].into(), [9u8; Key::BYTES].into()])
             .expect("multi_get should merge staged results");
         assert_eq!(values, vec![42, 0]);
 
@@ -1871,7 +1875,7 @@ mod facade_tests {
     fn pop_returns_previous_value_and_removes_key() -> StoreResult<()> {
         let orchestrator = DummyOrchestrator::new();
         let facade = MhinStoreFacade::from_orchestrator(orchestrator.clone());
-        let key = [0xAAu8; 8];
+        let key = [0xAAu8; Key::BYTES].into();
 
         facade
             .set(
@@ -1893,7 +1897,7 @@ mod facade_tests {
     fn pop_on_missing_key_returns_empty_value() -> StoreResult<()> {
         let orchestrator = DummyOrchestrator::new();
         let facade = MhinStoreFacade::from_orchestrator(orchestrator);
-        let key = [0xBBu8; 8];
+        let key = [0xBBu8; Key::BYTES].into();
 
         let removed = facade.pop(1, key)?;
         assert_eq!(removed, Value::empty());
@@ -1908,11 +1912,11 @@ mod facade_tests {
             .state
             .lock()
             .unwrap()
-            .insert([0x11u8; 8], 5.into());
+            .insert(Key::from([0x11u8; Key::BYTES]), 5.into());
 
         let base = MhinStoreFacade::from_orchestrator(orchestrator);
         let block_facade = MhinStoreBlockFacade::from_facade(base);
-        let key = [0x11u8; 8];
+        let key = Key::from([0x11u8; Key::BYTES]);
 
         block_facade.start_block(2)?;
         block_facade
@@ -1938,7 +1942,7 @@ mod facade_tests {
         let block_facade = MhinStoreBlockFacade::from_facade(base);
 
         block_facade.start_block(5).unwrap();
-        let err = StoreFacade::pop(&block_facade, 6, [0u8; 8]).unwrap_err();
+        let err = StoreFacade::pop(&block_facade, 6, [0u8; Key::BYTES].into()).unwrap_err();
         match err {
             MhinStoreError::BlockInProgress { current } => assert_eq!(current, 5),
             other => panic!("unexpected error: {other:?}"),

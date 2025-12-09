@@ -6,7 +6,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::{DurabilityMode, MhinStoreFacade, StoreConfig, StoreFacade, StoreResult};
 
 use super::e2e_support::{
@@ -25,7 +25,7 @@ fn e2e_async_durability_queue() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let key = [0xA1u8; 8];
+    let key: Key = [0xA1u8; Key::BYTES].into();
 
     for block in 1..=4 {
         apply_block(
@@ -78,7 +78,7 @@ fn e2e_async_empty_block_waits_for_persistence() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let key = [0xE1u8; 8];
+    let key: Key = [0xE1u8; Key::BYTES].into();
 
     apply_block(
         &store,
@@ -125,7 +125,7 @@ fn e2e_async_relaxed_rollback_truncates_non_durable_blocks() -> StoreResult<()> 
         .build();
     let store = harness.open()?;
 
-    let key = [0xAAu8; 8];
+    let key: Key = [0xAAu8; Key::BYTES].into();
     store.enable_relaxed_mode(25)?;
 
     for block in 1u64..=5 {
@@ -184,7 +184,7 @@ fn e2e_async_relaxed_boot_respects_configured_policy() -> StoreResult<()> {
         })
         .build();
     let store = harness.open()?;
-    let key = [0xACu8; 8];
+    let key: Key = [0xACu8; Key::BYTES].into();
 
     for block in 1u64..=3 {
         apply_block(
@@ -247,7 +247,7 @@ fn e2e_sync_relaxed_toggle_restores_sync_mode() -> StoreResult<()> {
         .durability_mode(DurabilityMode::Synchronous)
         .build();
     let store = harness.open()?;
-    let key = [0xB2u8; 8];
+    let key: Key = [0xB2u8; Key::BYTES].into();
 
     store.enable_relaxed_mode(25)?;
     apply_block(
@@ -299,7 +299,7 @@ fn e2e_sync_relaxed_shutdown_preserves_snapshot() -> StoreResult<()> {
         .durability_mode(DurabilityMode::Synchronous)
         .build();
 
-    let key = [0xB3u8; 8];
+    let key: Key = [0xB3u8; Key::BYTES].into();
 
     {
         let store = harness.open()?;
@@ -358,7 +358,7 @@ fn e2e_sync_empty_block_crash_helper() -> StoreResult<()> {
     config.durability_mode = DurabilityMode::Synchronous;
     let store = MhinStoreFacade::new(config)?;
 
-    let key = [0xF1u8; 8];
+    let key: Key = [0xF1u8; Key::BYTES].into();
 
     apply_block(
         &store,
@@ -402,7 +402,7 @@ fn e2e_sync_empty_block_survives_crash() -> StoreResult<()> {
 
     // After reopening, the empty block must still be reported as durable.
     let reopened = harness.reopen()?;
-    let key = [0xF1u8; 8];
+    let key: Key = [0xF1u8; Key::BYTES].into();
 
     assert_eq!(reopened.current_block()?, 2);
     assert_eq!(reopened.durable_block()?, 2);
@@ -440,7 +440,7 @@ fn e2e_async_relaxed_crash_helper() -> StoreResult<()> {
     };
 
     let store = MhinStoreFacade::new(config)?;
-    let key = [0xE2u8; 8];
+    let key: Key = [0xE2u8; Key::BYTES].into();
 
     apply_block(
         &store,
@@ -528,7 +528,7 @@ fn e2e_async_relaxed_crash_recovers() -> StoreResult<()> {
     let _ = fs::remove_file(&expectations_path);
 
     let reopened = harness.reopen()?;
-    let key = [0xE2u8; 8];
+    let key: Key = [0xE2u8; Key::BYTES].into();
 
     let current = reopened.current_block()?;
     assert!(
@@ -576,7 +576,7 @@ fn e2e_sync_durability() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let key = [0xB1u8; 8];
+    let key: Key = [0xB1u8; Key::BYTES].into();
 
     apply_block(
         &store,
@@ -622,7 +622,7 @@ fn e2e_restart_replays_journal() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let key = [0xC1u8; 8];
+    let key: Key = [0xC1u8; Key::BYTES].into();
 
     apply_block(
         &store,
@@ -669,7 +669,7 @@ fn e2e_snapshot_refresh() -> StoreResult<()> {
         .max_snapshot_interval(Duration::from_secs(1))
         .build();
 
-    let key = [0xD1u8; 8];
+    let key: Key = [0xD1u8; Key::BYTES].into();
     {
         let store = harness.open()?;
 

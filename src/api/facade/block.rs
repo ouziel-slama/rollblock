@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::{MhinStoreError, StoreResult};
-use crate::types::{BlockId, Key, Operation, Value};
+use crate::types::{BlockId, Operation, StoreKey as Key, Value};
 
 use super::core::MhinStoreFacade;
 use super::StoreFacade;

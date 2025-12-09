@@ -3,7 +3,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rollblock::types::Operation;
+use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::{DurabilityMode, MhinStoreError, MhinStoreFacade, StoreFacade, StoreResult};
 
 use super::e2e_support::{
@@ -21,7 +21,7 @@ fn e2e_multi_reader() -> StoreResult<()> {
         .durability_mode(DurabilityMode::Synchronous)
         .build();
     let store = harness.open()?;
-    let key = [0xE1u8; 8];
+    let key: Key = [0xE1u8; Key::BYTES].into();
 
     apply_block(
         &store,
@@ -175,7 +175,9 @@ fn e2e_parallel_execution() -> StoreResult<()> {
         .build();
     let store = harness.open()?;
 
-    let keys: Vec<[u8; 8]> = (0..BATCH_SIZE).map(|i| (i as u64).to_le_bytes()).collect();
+    let keys: Vec<Key> = (0..BATCH_SIZE)
+        .map(|i| Key::from_u64_le(i as u64))
+        .collect();
 
     let initial_operations: Vec<Operation> = keys
         .iter()

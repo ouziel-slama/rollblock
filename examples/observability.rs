@@ -4,8 +4,12 @@
 //! For JSON logs: RUST_LOG=rollblock=info cargo run --example observability
 
 use rollblock::metrics::HealthState;
-use rollblock::types::{Operation, Value};
+use rollblock::types::{Operation, StoreKey as Key, Value};
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+
+fn key_from_u8(i: u8) -> Key {
+    Key::from_prefix([i, 0, 0, 0, 0, 0, 0, 0])
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing subscriber for structured logging
@@ -50,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut operations = Vec::new();
     for i in 0..10 {
         operations.push(Operation {
-            key: [i, 0, 0, 0, 0, 0, 0, 0],
+            key: key_from_u8(i),
             value: (i as u64 * 100).into(),
         });
     }
@@ -61,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut operations = Vec::new();
     for i in 0..5 {
         operations.push(Operation {
-            key: [i, 0, 0, 0, 0, 0, 0, 0],
+            key: key_from_u8(i),
             value: (i as u64 * 200).into(),
         });
     }
@@ -72,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut operations = Vec::new();
     for i in 0..3 {
         operations.push(Operation {
-            key: [i, 0, 0, 0, 0, 0, 0, 0],
+            key: key_from_u8(i),
             value: Value::empty(),
         });
     }
@@ -82,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Perform some lookups
     println!("\n🔎 Performing lookups...");
     for i in 0..10 {
-        let key = [i, 0, 0, 0, 0, 0, 0, 0];
+        let key = key_from_u8(i);
         let _ = store.get(key)?;
     }
     println!("✓ Performed 10 lookups");

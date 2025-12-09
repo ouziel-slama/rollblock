@@ -7,6 +7,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.0] - 2025-12-09
+
+### Breaking Changes
+- Key width is now a compile-time constant negotiated during the remote handshake; clients/servers built before this change cannot talk to new builds and vice versa.
+- Shard routing switched to `xxh3` hashing of full key bytes. Existing data must be rebuilt/replayed because shard placement changes.
+- Metadata/journal/snapshot formats now persist the key width; previously written stores are not readable without recreating data directories and artifacts.
+
 ## [0.3.4] - 2025-12-06
 
 ### Fixed

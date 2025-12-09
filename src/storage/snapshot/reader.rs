@@ -5,11 +5,10 @@ use memmap2::Mmap;
 
 use crate::error::{MhinStoreError, StoreResult};
 use crate::state_shard::StateShard;
-use crate::types::{BlockId, Key, ValueBuf, MAX_VALUE_BYTES};
+use crate::types::{BlockId, StoreKey as Key, ValueBuf, MAX_VALUE_BYTES};
 
 use super::format::{checksum_to_u64, parse_header};
 
-const KEY_WIDTH: usize = 8;
 const VALUE_LEN_WIDTH: usize = 2;
 
 pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> StoreResult<BlockId> {
@@ -17,6 +16,14 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
     let mmap = unsafe { Mmap::map(&file)? };
 
     let header = parse_header(path, &mmap)?;
+
+    if header.key_bytes != Key::BYTES {
+        return Err(MhinStoreError::ConfigurationMismatch {
+            field: "key_bytes",
+            stored: header.key_bytes,
+            requested: Key::BYTES,
+        });
+    }
 
     if header.shard_count != shards.len() {
         return Err(MhinStoreError::SnapshotCorrupted {
@@ -104,13 +111,14 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
 
         let entry_section_start = data_offset + 8;
         let remaining_bytes = mmap.len().saturating_sub(entry_section_start);
-        let max_entries_possible = remaining_bytes / (KEY_WIDTH + VALUE_LEN_WIDTH);
+        // Invariant: header.key_bytes == Key::BYTES is validated at function entry.
+        let max_entries_possible = remaining_bytes / (Key::BYTES + VALUE_LEN_WIDTH);
         let reserve = entry_count.min(max_entries_possible);
         let mut shard_entries = Vec::with_capacity(reserve);
         let mut entry_pos = entry_section_start;
 
         for _ in 0..entry_count {
-            if entry_pos + 10 > mmap.len() {
+            if entry_pos + Key::BYTES + VALUE_LEN_WIDTH > mmap.len() {
                 return Err(MhinStoreError::SnapshotCorrupted {
                     path: path.to_path_buf(),
                     reason: format!(
@@ -121,9 +129,10 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
             }
 
             let mut key = Key::default();
-            key.copy_from_slice(&mmap[entry_pos..entry_pos + 8]);
+            key.0
+                .copy_from_slice(&mmap[entry_pos..entry_pos + Key::BYTES]);
 
-            let len_offset = entry_pos + 8;
+            let len_offset = entry_pos + Key::BYTES;
             let value_len = u16::from_le_bytes([mmap[len_offset], mmap[len_offset + 1]]) as usize;
 
             if value_len > MAX_VALUE_BYTES {

@@ -2,8 +2,12 @@
 //!
 //! Run with: cargo run --example basic_usage
 
-use rollblock::types::{Operation, Value};
+use rollblock::types::{Operation, StoreKey as Key, Value};
 use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+
+fn key(byte: u8) -> Key {
+    Key::from_prefix([byte, 0, 0, 0, 0, 0, 0, 0])
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Rollblock Basic Usage Example\n");
@@ -27,17 +31,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Example 1: SET a new key-value pair
     println!("✏️  Block 1: Setting key [1,0,0,0,0,0,0,0] = 100");
-    let key = [1, 0, 0, 0, 0, 0, 0, 0];
+    let key1 = key(1);
     store.set(
         1,
         vec![Operation {
-            key,
+            key: key1,
             value: 100.into(),
         }],
     )?;
 
     // Verify the value
-    let value = store.get(key)?;
+    let value = store.get(key1)?;
     if value.is_delete() {
         println!("   ✗ Key not found\n");
     } else {
@@ -49,12 +53,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.set(
         2,
         vec![Operation {
-            key,
+            key: key1,
             value: 200.into(),
         }],
     )?;
 
-    let value = store.get(key)?;
+    let value = store.get(key1)?;
     if value.is_delete() {
         println!("   ✗ Key not found\n");
     } else {
@@ -65,15 +69,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✏️  Block 3: Batch set multiple keys");
     let operations = vec![
         Operation {
-            key: [2, 0, 0, 0, 0, 0, 0, 0],
+            key: key(2),
             value: 300.into(),
         },
         Operation {
-            key: [3, 0, 0, 0, 0, 0, 0, 0],
+            key: key(3),
             value: 400.into(),
         },
         Operation {
-            key: [4, 0, 0, 0, 0, 0, 0, 0],
+            key: key(4),
             value: 500.into(),
         },
     ];
@@ -82,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify all keys
     for i in 1..=4 {
-        let k = [i, 0, 0, 0, 0, 0, 0, 0];
+        let k = key(i);
         let v = store.get(k)?;
         if v.is_set() {
             println!("   Key {:?} = {:?}", k, v.as_slice());
@@ -100,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Verify state after rollback
     println!("📊 State after rollback:");
     for i in 1..=4 {
-        let k = [i, 0, 0, 0, 0, 0, 0, 0];
+        let k = key(i);
         let v = store.get(k)?;
         if v.is_set() {
             println!("   Key {:?} = {:?}", k, v.as_slice());
@@ -115,12 +119,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.set(
         4,
         vec![Operation {
-            key,
+            key: key1,
             value: Value::empty(),
         }],
     )?;
 
-    if store.get(key)?.is_delete() {
+    if store.get(key1)?.is_delete() {
         println!("   ✓ Key deleted successfully\n");
     } else {
         println!("   ✗ Key still exists\n");
