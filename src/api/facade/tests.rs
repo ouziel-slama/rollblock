@@ -10,7 +10,7 @@ mod recovery_tests {
     use crate::state_engine::ShardedStateEngine;
     use crate::state_shard::RawTableShard;
     use crate::types::{BlockUndo, JournalMeta, Operation};
-    use crate::MhinStoreError;
+    use crate::StoreError;
     use std::ops::RangeInclusive;
     use std::sync::Arc;
 
@@ -124,7 +124,7 @@ mod recovery_tests {
             .expect_err("expected missing offsets to produce an error");
 
         match err {
-            MhinStoreError::MissingJournalEntry { block } => assert_eq!(block, 3),
+            StoreError::MissingJournalEntry { block } => assert_eq!(block, 3),
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -147,7 +147,7 @@ mod recovery_tests {
             .expect_err("expected gaps to produce an error");
 
         match err {
-            MhinStoreError::MissingJournalEntry { block } => assert_eq!(block, 4),
+            StoreError::MissingJournalEntry { block } => assert_eq!(block, 4),
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -171,8 +171,8 @@ mod facade_tests {
     use crate::snapshot::Snapshotter;
     use crate::types::{BlockUndo, JournalMeta, ValueBuf};
     use crate::{
-        BlockOrchestrator, FileBlockJournal, MhinStoreError, MmapSnapshotter, RawTableShard,
-        ShardedStateEngine, StateShard,
+        BlockOrchestrator, FileBlockJournal, MmapSnapshotter, RawTableShard, ShardedStateEngine,
+        StateShard, StoreError,
     };
     use tempfile::{tempdir, tempdir_in};
 
@@ -269,12 +269,12 @@ mod facade_tests {
             })
         }
 
-        fn fatal_error(&self) -> Option<MhinStoreError> {
+        fn fatal_error(&self) -> Option<StoreError> {
             self.fatal
                 .lock()
                 .unwrap()
                 .clone()
-                .map(|(block, reason)| MhinStoreError::DurabilityFailure { block, reason })
+                .map(|(block, reason)| StoreError::DurabilityFailure { block, reason })
         }
     }
 
@@ -371,7 +371,7 @@ mod facade_tests {
     #[test]
     fn enable_relaxed_mode_batches_metadata_before_relaxing_journal() -> StoreResult<()> {
         let orchestrator = RecordingDurabilityOrchestrator::new();
-        let store = MhinStoreFacade::from_orchestrator(orchestrator.clone());
+        let store = SimpleStoreFacade::from_orchestrator(orchestrator.clone());
 
         store.enable_relaxed_mode(8)?;
 
@@ -396,7 +396,7 @@ mod facade_tests {
     #[test]
     fn disable_relaxed_mode_flushes_before_metadata_interval_reset() -> StoreResult<()> {
         let orchestrator = RecordingDurabilityOrchestrator::new();
-        let store = MhinStoreFacade::from_orchestrator(orchestrator.clone());
+        let store = SimpleStoreFacade::from_orchestrator(orchestrator.clone());
 
         store.enable_relaxed_mode(8)?;
         orchestrator.drain_events(); // Ignore ordering from enable path.
@@ -433,7 +433,7 @@ mod facade_tests {
     #[test]
     fn relaxed_mode_enabled_reflects_runtime_state() -> StoreResult<()> {
         let orchestrator = RecordingDurabilityOrchestrator::new();
-        let store = MhinStoreFacade::from_orchestrator(orchestrator);
+        let store = SimpleStoreFacade::from_orchestrator(orchestrator);
 
         assert!(
             !store.relaxed_mode_enabled(),
@@ -455,7 +455,7 @@ mod facade_tests {
         Ok(())
     }
 
-    fn wait_for_durable(store: &MhinStoreFacade, target: BlockId) {
+    fn wait_for_durable(store: &SimpleStoreFacade, target: BlockId) {
         for _ in 0..100 {
             if store.durable_block().unwrap() >= target {
                 return;
@@ -555,7 +555,7 @@ mod facade_tests {
 
     impl BlockOrchestrator for FailingOrchestrator {
         fn apply_operations(&self, block_height: BlockId, _ops: Vec<Operation>) -> StoreResult<()> {
-            Err(MhinStoreError::BlockIdNotIncreasing {
+            Err(StoreError::BlockIdNotIncreasing {
                 block_height,
                 current: block_height,
             })
@@ -614,7 +614,7 @@ mod facade_tests {
         }
 
         fn pop(&self, block_height: BlockId, _key: Key) -> StoreResult<Value> {
-            Err(MhinStoreError::BlockIdNotIncreasing {
+            Err(StoreError::BlockIdNotIncreasing {
                 block_height,
                 current: block_height,
             })
@@ -735,11 +735,11 @@ mod facade_tests {
         }
 
         fn iter_backwards(&self, _from: BlockId, to: BlockId) -> StoreResult<JournalIter> {
-            Err(MhinStoreError::MissingJournalEntry { block: to })
+            Err(StoreError::MissingJournalEntry { block: to })
         }
 
         fn read_entry(&self, meta: &JournalMeta) -> StoreResult<JournalBlock> {
-            Err(MhinStoreError::MissingJournalEntry {
+            Err(StoreError::MissingJournalEntry {
                 block: meta.block_height,
             })
         }
@@ -810,16 +810,16 @@ mod facade_tests {
         let data_dir = tmp.path().join("store");
 
         let initial_config = test_store_config(&data_dir, 2, 64, 1);
-        let store = MhinStoreFacade::new(initial_config).expect("initial store should open");
+        let store = SimpleStoreFacade::new(initial_config).expect("initial store should open");
         drop(store);
 
         let mismatched = test_store_config(&data_dir, 3, 64, 1);
-        let err = match MhinStoreFacade::new(mismatched) {
+        let err = match SimpleStoreFacade::new(mismatched) {
             Ok(_) => panic!("shard mismatch should error"),
             Err(err) => err,
         };
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,
@@ -832,12 +832,12 @@ mod facade_tests {
         }
 
         let capacity_mismatch = test_store_config(&data_dir, 2, 128, 1);
-        let err = match MhinStoreFacade::new(capacity_mismatch) {
+        let err = match SimpleStoreFacade::new(capacity_mismatch) {
             Ok(_) => panic!("capacity mismatch should error"),
             Err(err) => err,
         };
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,
@@ -857,7 +857,7 @@ mod facade_tests {
         let data_dir = tmp.path().join("store");
 
         let initial_config = test_store_config(&data_dir, 4, 32, 1);
-        let store = MhinStoreFacade::new(initial_config).expect("initial store should open");
+        let store = SimpleStoreFacade::new(initial_config).expect("initial store should open");
         drop(store);
 
         let existing = StoreConfig::existing_with_lmdb_map_size(&data_dir, TEST_LMDB_MAP_SIZE)
@@ -865,7 +865,7 @@ mod facade_tests {
         assert_eq!(existing.shards_count, None);
         assert_eq!(existing.initial_capacity, None);
 
-        let reopened = MhinStoreFacade::new(existing).expect("existing store should open");
+        let reopened = SimpleStoreFacade::new(existing).expect("existing store should open");
         assert_eq!(reopened.current_block().unwrap(), 0);
     }
 
@@ -876,7 +876,7 @@ mod facade_tests {
         let data_dir = tmp.path().join("store");
 
         let config = test_store_config(&data_dir, 4, 32, 1);
-        let facade = MhinStoreFacade::new(config).expect("facade should initialize");
+        let facade = SimpleStoreFacade::new(config).expect("facade should initialize");
 
         let key = [42u8; Key::BYTES].into();
         facade
@@ -899,7 +899,7 @@ mod facade_tests {
         facade.close().expect("close should succeed");
         drop(facade);
 
-        let reopened = MhinStoreFacade::new(
+        let reopened = SimpleStoreFacade::new(
             StoreConfig::existing_with_lmdb_map_size(&data_dir, TEST_LMDB_MAP_SIZE)
                 .without_remote_server(),
         )
@@ -910,8 +910,8 @@ mod facade_tests {
     #[test]
     fn facades_report_current_block() {
         let orchestrator = DummyOrchestrator::new();
-        let facade = MhinStoreFacade::from_orchestrator(orchestrator.clone());
-        let block_facade = MhinStoreBlockFacade::from_facade(facade.clone());
+        let facade = SimpleStoreFacade::from_orchestrator(orchestrator.clone());
+        let block_facade = BlockStoreFacade::from_facade(facade.clone());
 
         assert_eq!(facade.current_block().unwrap(), 0);
         assert_eq!(block_facade.current_block().unwrap(), 0);
@@ -930,7 +930,7 @@ mod facade_tests {
         let data_dir = tmp.path().join("parallel-store");
         let config = test_store_config(&data_dir, 8, 64, 4);
 
-        let facade = MhinStoreFacade::new(config).expect("parallel facade should initialize");
+        let facade = SimpleStoreFacade::new(config).expect("parallel facade should initialize");
         let key_a = [1u8; Key::BYTES].into();
         let key_b = [2u8; Key::BYTES].into();
 
@@ -982,7 +982,7 @@ mod facade_tests {
         assert!(
             matches!(
                 err,
-                MhinStoreError::BlockIdNotIncreasing {
+                StoreError::BlockIdNotIncreasing {
                     block_height: 1,
                     current: 2
                 }
@@ -1100,7 +1100,7 @@ mod facade_tests {
             replay_committed_blocks(&journal, metadata.as_ref(), &engine, 0 /* restored */);
 
         match result {
-            Err(MhinStoreError::MissingJournalEntry { block }) => {
+            Err(StoreError::MissingJournalEntry { block }) => {
                 assert_eq!(block, block_height);
             }
             other => panic!("expected MissingJournalEntry error, got {other:?}"),
@@ -1170,7 +1170,7 @@ mod facade_tests {
     #[test]
     fn facade_from_orchestrator_delegates_calls() {
         let orchestrator = DummyOrchestrator::new();
-        let facade = MhinStoreFacade::from_orchestrator(orchestrator.clone());
+        let facade = SimpleStoreFacade::from_orchestrator(orchestrator.clone());
 
         facade.set(5, vec![sample_operation(9)]).unwrap();
         assert_eq!(
@@ -1197,8 +1197,8 @@ mod facade_tests {
     #[test]
     fn block_facade_stages_operations_before_commit() {
         let orchestrator = DummyOrchestrator::new();
-        let base = MhinStoreFacade::from_orchestrator(orchestrator.clone());
-        let facade = MhinStoreBlockFacade::from_facade(base);
+        let base = SimpleStoreFacade::from_orchestrator(orchestrator.clone());
+        let facade = BlockStoreFacade::from_facade(base);
         let key = [42u8; Key::BYTES].into();
 
         facade.start_block(1).unwrap();
@@ -1236,8 +1236,8 @@ mod facade_tests {
     #[test]
     fn block_facade_overrides_existing_values_in_staging() {
         let orchestrator = DummyOrchestrator::new();
-        let base = MhinStoreFacade::from_orchestrator(orchestrator.clone());
-        let facade = MhinStoreBlockFacade::from_facade(base);
+        let base = SimpleStoreFacade::from_orchestrator(orchestrator.clone());
+        let facade = BlockStoreFacade::from_facade(base);
         let key = [7u8; Key::BYTES].into();
 
         // Seed orchestrator with existing value through regular set.
@@ -1289,12 +1289,12 @@ mod facade_tests {
     #[test]
     fn block_facade_validates_block_lifecycle() {
         let orchestrator = DummyOrchestrator::new();
-        let base = MhinStoreFacade::from_orchestrator(orchestrator);
-        let facade = MhinStoreBlockFacade::from_facade(base);
+        let base = SimpleStoreFacade::from_orchestrator(orchestrator);
+        let facade = BlockStoreFacade::from_facade(base);
 
         let err = facade.end_block().unwrap_err();
         assert!(
-            matches!(err, MhinStoreError::NoBlockInProgress),
+            matches!(err, StoreError::NoBlockInProgress),
             "ending without start should error"
         );
 
@@ -1305,14 +1305,14 @@ mod facade_tests {
             })
             .unwrap_err();
         assert!(
-            matches!(err, MhinStoreError::NoBlockInProgress),
+            matches!(err, StoreError::NoBlockInProgress),
             "set without start should error"
         );
 
         facade.start_block(10).unwrap();
         let err = facade.start_block(11).unwrap_err();
         assert!(
-            matches!(err, MhinStoreError::BlockInProgress { current: 10 }),
+            matches!(err, StoreError::BlockInProgress { current: 10 }),
             "starting a second block should fail"
         );
     }
@@ -1320,13 +1320,13 @@ mod facade_tests {
     #[test]
     fn block_facade_prevents_rollback_with_pending_block() {
         let orchestrator = DummyOrchestrator::new();
-        let base = MhinStoreFacade::from_orchestrator(orchestrator);
-        let facade = MhinStoreBlockFacade::from_facade(base);
+        let base = SimpleStoreFacade::from_orchestrator(orchestrator);
+        let facade = BlockStoreFacade::from_facade(base);
 
         facade.start_block(5).unwrap();
         let err = facade.rollback(2).unwrap_err();
         assert!(
-            matches!(err, MhinStoreError::BlockInProgress { current: 5 }),
+            matches!(err, StoreError::BlockInProgress { current: 5 }),
             "rollback should fail when block is staged"
         );
     }
@@ -1334,8 +1334,8 @@ mod facade_tests {
     #[test]
     fn block_facade_commit_failure_is_fatal() {
         let orchestrator = FailingOrchestrator::new();
-        let base = MhinStoreFacade::from_orchestrator(orchestrator);
-        let facade = MhinStoreBlockFacade::from_facade(base);
+        let base = SimpleStoreFacade::from_orchestrator(orchestrator);
+        let facade = BlockStoreFacade::from_facade(base);
         let key = [5u8; Key::BYTES].into();
 
         facade.start_block(1).unwrap();
@@ -1348,7 +1348,7 @@ mod facade_tests {
 
         let err = facade.end_block().unwrap_err();
         match err {
-            MhinStoreError::DurabilityFailure { block, reason } => {
+            StoreError::DurabilityFailure { block, reason } => {
                 assert_eq!(block, 1);
                 assert!(
                     reason.contains("block facade failed"),
@@ -1360,19 +1360,19 @@ mod facade_tests {
 
         let health_err = facade.ensure_healthy().unwrap_err();
         match health_err {
-            MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
+            StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
             other => panic!("unexpected health error: {other:?}"),
         }
 
         let start_err = facade.start_block(2).unwrap_err();
         match start_err {
-            MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
+            StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
             other => panic!("unexpected start_block error: {other:?}"),
         }
 
         let get_err = facade.get(key).unwrap_err();
         match get_err {
-            MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
+            StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
             other => panic!("unexpected get error: {other:?}"),
         }
     }
@@ -1387,7 +1387,7 @@ mod facade_tests {
         let key = Key::from([0xABu8; Key::BYTES]);
 
         {
-            let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
+            let store = SimpleStoreFacade::new(config.clone()).expect("store should initialize");
             store
                 .set(
                     1,
@@ -1400,7 +1400,7 @@ mod facade_tests {
             store.close().expect("close should succeed");
         }
 
-        let reopened = MhinStoreFacade::new(config).expect("store should restart");
+        let reopened = SimpleStoreFacade::new(config).expect("store should restart");
         assert_eq!(reopened.get(key).unwrap(), 99);
     }
 
@@ -1414,7 +1414,7 @@ mod facade_tests {
         let key = Key::from([0xA5u8; Key::BYTES]);
 
         {
-            let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
+            let store = SimpleStoreFacade::new(config.clone()).expect("store should initialize");
             store
                 .set(
                     1,
@@ -1427,7 +1427,7 @@ mod facade_tests {
             // drop without calling close()
         }
 
-        let reopened = MhinStoreFacade::new(config.clone())
+        let reopened = SimpleStoreFacade::new(config.clone())
             .expect("store should reopen even without snapshot");
         assert_eq!(
             reopened.get(key).unwrap(),
@@ -1456,7 +1456,7 @@ mod facade_tests {
         let key = Key::from([0xB6u8; Key::BYTES]);
 
         {
-            let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
+            let store = SimpleStoreFacade::new(config.clone()).expect("store should initialize");
             store
                 .set(
                     1,
@@ -1471,7 +1471,7 @@ mod facade_tests {
 
         {
             let store =
-                MhinStoreFacade::new(config.clone()).expect("store should reopen after snapshot");
+                SimpleStoreFacade::new(config.clone()).expect("store should reopen after snapshot");
             assert_eq!(
                 store.get(key).unwrap(),
                 10,
@@ -1491,7 +1491,7 @@ mod facade_tests {
         }
 
         let reopened =
-            MhinStoreFacade::new(config.clone()).expect("store should reopen after crash");
+            SimpleStoreFacade::new(config.clone()).expect("store should reopen after crash");
         assert_eq!(
             reopened.get(key).unwrap(),
             99,
@@ -1521,7 +1521,7 @@ mod facade_tests {
         let snapshot_path = |block: u64| snapshots_dir.join(format!("snapshot_{block:016x}.bin"));
 
         {
-            let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
+            let store = SimpleStoreFacade::new(config.clone()).expect("store should initialize");
             store
                 .set(
                     1,
@@ -1540,7 +1540,7 @@ mod facade_tests {
 
         {
             let store =
-                MhinStoreFacade::new(config.clone()).expect("store should reopen with snapshot");
+                SimpleStoreFacade::new(config.clone()).expect("store should reopen with snapshot");
             store
                 .set(
                     2,
@@ -1561,7 +1561,7 @@ mod facade_tests {
 
         {
             let store =
-                MhinStoreFacade::new(config.clone()).expect("store should reopen for rollback");
+                SimpleStoreFacade::new(config.clone()).expect("store should reopen for rollback");
             store.rollback(1).expect("rollback should succeed");
             assert!(
                 snapshot_path(1).exists(),
@@ -1580,7 +1580,7 @@ mod facade_tests {
         }
 
         let reopened =
-            MhinStoreFacade::new(config).expect("store should reopen after rollback cleanup");
+            SimpleStoreFacade::new(config).expect("store should reopen after rollback cleanup");
         assert_eq!(
             reopened.get(key).unwrap(),
             5,
@@ -1598,7 +1598,7 @@ mod facade_tests {
         let key = Key::from([0x33u8; Key::BYTES]);
 
         {
-            let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
+            let store = SimpleStoreFacade::new(config.clone()).expect("store should initialize");
             store
                 .set(
                     1,
@@ -1626,7 +1626,7 @@ mod facade_tests {
             store.close().expect("close after rollback should succeed");
         }
 
-        let reopened = MhinStoreFacade::new(config.clone()).expect("store should reopen");
+        let reopened = SimpleStoreFacade::new(config.clone()).expect("store should reopen");
         assert_eq!(
             reopened.get(key).unwrap(),
             10,
@@ -1654,7 +1654,7 @@ mod facade_tests {
         let key = Key::from([0x44u8; Key::BYTES]);
 
         {
-            let store = MhinStoreFacade::new(config.clone()).expect("store should initialize");
+            let store = SimpleStoreFacade::new(config.clone()).expect("store should initialize");
             store
                 .set(
                     1,
@@ -1702,7 +1702,7 @@ mod facade_tests {
         chunk.sync_all().unwrap();
         drop(chunk);
 
-        let reopened = MhinStoreFacade::new(config.clone()).expect("store should reopen");
+        let reopened = SimpleStoreFacade::new(config.clone()).expect("store should reopen");
         assert_eq!(
             reopened.get(key).unwrap(),
             11,
@@ -1724,7 +1724,7 @@ mod facade_tests {
     fn drop_triggers_shutdown_on_last_instance() {
         let orchestrator = ShutdownTrackingOrchestrator::new();
         let shutdown_state = Arc::new(AtomicBool::new(false));
-        let facade = MhinStoreFacade::new_for_testing(
+        let facade = SimpleStoreFacade::new_for_testing(
             orchestrator.clone(),
             Arc::clone(&shutdown_state),
             Arc::new(AtomicUsize::new(1)),
@@ -1747,7 +1747,7 @@ mod facade_tests {
     fn drop_defers_shutdown_until_last_clone() {
         let orchestrator = ShutdownTrackingOrchestrator::new();
         let shutdown_state = Arc::new(AtomicBool::new(false));
-        let facade = MhinStoreFacade::new_for_testing(
+        let facade = SimpleStoreFacade::new_for_testing(
             orchestrator.clone(),
             Arc::clone(&shutdown_state),
             Arc::new(AtomicUsize::new(1)),
@@ -1781,7 +1781,7 @@ mod facade_tests {
     fn close_prevents_drop_from_running_shutdown_twice() {
         let orchestrator = ShutdownTrackingOrchestrator::new();
         let shutdown_state = Arc::new(AtomicBool::new(false));
-        let facade = MhinStoreFacade::new_for_testing(
+        let facade = SimpleStoreFacade::new_for_testing(
             orchestrator.clone(),
             Arc::clone(&shutdown_state),
             Arc::new(AtomicUsize::new(1)),
@@ -1815,7 +1815,7 @@ mod facade_tests {
             state.insert([3u8; Key::BYTES].into(), 33.into());
         }
 
-        let facade = MhinStoreFacade::new_for_testing(
+        let facade = SimpleStoreFacade::new_for_testing(
             orchestrator.clone(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicUsize::new(1)),
@@ -1842,12 +1842,12 @@ mod facade_tests {
                 .insert([9u8; Key::BYTES].into(), 5.into());
         }
 
-        let inner = MhinStoreFacade::new_for_testing(
+        let inner = SimpleStoreFacade::new_for_testing(
             orchestrator.clone(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicUsize::new(1)),
         );
-        let block_facade = MhinStoreBlockFacade::from_facade(inner);
+        let block_facade = BlockStoreFacade::from_facade(inner);
 
         block_facade.start_block(1).expect("block should start");
         block_facade
@@ -1874,7 +1874,7 @@ mod facade_tests {
     #[test]
     fn pop_returns_previous_value_and_removes_key() -> StoreResult<()> {
         let orchestrator = DummyOrchestrator::new();
-        let facade = MhinStoreFacade::from_orchestrator(orchestrator.clone());
+        let facade = SimpleStoreFacade::from_orchestrator(orchestrator.clone());
         let key = [0xAAu8; Key::BYTES].into();
 
         facade
@@ -1896,7 +1896,7 @@ mod facade_tests {
     #[test]
     fn pop_on_missing_key_returns_empty_value() -> StoreResult<()> {
         let orchestrator = DummyOrchestrator::new();
-        let facade = MhinStoreFacade::from_orchestrator(orchestrator);
+        let facade = SimpleStoreFacade::from_orchestrator(orchestrator);
         let key = [0xBBu8; Key::BYTES].into();
 
         let removed = facade.pop(1, key)?;
@@ -1914,8 +1914,8 @@ mod facade_tests {
             .unwrap()
             .insert(Key::from([0x11u8; Key::BYTES]), 5.into());
 
-        let base = MhinStoreFacade::from_orchestrator(orchestrator);
-        let block_facade = MhinStoreBlockFacade::from_facade(base);
+        let base = SimpleStoreFacade::from_orchestrator(orchestrator);
+        let block_facade = BlockStoreFacade::from_facade(base);
         let key = Key::from([0x11u8; Key::BYTES]);
 
         block_facade.start_block(2)?;
@@ -1938,13 +1938,13 @@ mod facade_tests {
     #[test]
     fn block_facade_store_pop_rejects_during_pending_block() {
         let orchestrator = DummyOrchestrator::new();
-        let base = MhinStoreFacade::from_orchestrator(orchestrator);
-        let block_facade = MhinStoreBlockFacade::from_facade(base);
+        let base = SimpleStoreFacade::from_orchestrator(orchestrator);
+        let block_facade = BlockStoreFacade::from_facade(base);
 
         block_facade.start_block(5).unwrap();
         let err = StoreFacade::pop(&block_facade, 6, [0u8; Key::BYTES].into()).unwrap_err();
         match err {
-            MhinStoreError::BlockInProgress { current } => assert_eq!(current, 5),
+            StoreError::BlockInProgress { current } => assert_eq!(current, 5),
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -1956,12 +1956,12 @@ mod facade_tests {
         let data_dir = tmp.path().join("block-close");
 
         let config = test_store_config(&data_dir, 2, 8, 1);
-        let facade = MhinStoreBlockFacade::new(config).expect("block facade should initialize");
+        let facade = BlockStoreFacade::new(config).expect("block facade should initialize");
         facade.start_block(7).unwrap();
 
         let err = facade.close().unwrap_err();
         match err {
-            MhinStoreError::BlockInProgress { current } => assert_eq!(current, 7),
+            StoreError::BlockInProgress { current } => assert_eq!(current, 7),
             other => panic!("unexpected error: {other:?}"),
         }
     }

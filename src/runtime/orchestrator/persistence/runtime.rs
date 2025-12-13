@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Condvar, Mutex};
 
 use crate::block_journal::BlockJournal;
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::metadata::MetadataStore;
 use crate::metrics::StoreMetrics;
 use crate::snapshot::Snapshotter;
@@ -179,7 +179,7 @@ where
             if let Some(err) = self.fatal_error() {
                 return Err(err);
             } else {
-                return Err(MhinStoreError::DurabilityFailure {
+                return Err(StoreError::DurabilityFailure {
                     block: task.block_height,
                     reason: "persistence runtime is shutting down".to_string(),
                 });
@@ -487,7 +487,7 @@ where
         }
     }
 
-    fn handle_persist_failure(&self, task: Arc<PersistenceTask>, err: MhinStoreError) {
+    fn handle_persist_failure(&self, task: Arc<PersistenceTask>, err: StoreError) {
         let block = task.block_height;
         let reason = err.to_string();
 
@@ -574,7 +574,7 @@ where
         // Notify drained tasks of the failure.
         for pending in drained_tasks {
             pending.set_status(TaskStatus::Completed(Err(Arc::new(
-                MhinStoreError::DurabilityFailure {
+                StoreError::DurabilityFailure {
                     block,
                     reason: reason.clone(),
                 },
@@ -783,11 +783,11 @@ where
         flush_result
     }
 
-    pub fn fatal_error(&self) -> Option<MhinStoreError> {
+    pub fn fatal_error(&self) -> Option<StoreError> {
         self.fatal_error
             .lock()
             .clone()
-            .map(|(block, reason)| MhinStoreError::DurabilityFailure { block, reason })
+            .map(|(block, reason)| StoreError::DurabilityFailure { block, reason })
     }
 
     pub fn ensure_healthy(&self) -> StoreResult<()> {

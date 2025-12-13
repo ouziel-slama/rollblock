@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rollblock::types::Operation;
-use rollblock::{DurabilityMode, MhinStoreFacade, StoreConfig, StoreFacade, StoreResult};
+use rollblock::{DurabilityMode, SimpleStoreFacade, StoreConfig, StoreFacade, StoreResult};
 use tempfile::{Builder, TempDir};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -57,17 +57,17 @@ impl StoreHarness {
         self.config.clone()
     }
 
-    pub fn open(&self) -> StoreResult<MhinStoreFacade> {
-        MhinStoreFacade::new(self.config.clone())
+    pub fn open(&self) -> StoreResult<SimpleStoreFacade> {
+        SimpleStoreFacade::new(self.config.clone())
     }
 
-    pub fn reopen(&self) -> StoreResult<MhinStoreFacade> {
+    pub fn reopen(&self) -> StoreResult<SimpleStoreFacade> {
         self.reopen_with_persisted_mode()
     }
 
     /// Reopens the store without overriding the durability mode, honoring the
     /// mode that was persisted in metadata (if any).
-    pub fn reopen_with_persisted_mode(&self) -> StoreResult<MhinStoreFacade> {
+    pub fn reopen_with_persisted_mode(&self) -> StoreResult<SimpleStoreFacade> {
         let mut config =
             StoreConfig::existing_with_lmdb_map_size(&self.data_dir, HARNESS_LMDB_MAP_SIZE)
                 .without_remote_server();
@@ -78,7 +78,7 @@ impl StoreHarness {
         config.compress_journal = self.config.compress_journal;
         config.journal_compression_level = self.config.journal_compression_level;
         config.journal_chunk_size_bytes = self.config.journal_chunk_size_bytes;
-        MhinStoreFacade::new(config)
+        SimpleStoreFacade::new(config)
     }
 }
 

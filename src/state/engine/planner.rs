@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::state::shard::StateShard;
 use crate::types::{
     BlockDelta, BlockId, Operation, ShardDelta, ShardOp, StoreKey as Key, UndoEntry, UndoOp, Value,
@@ -36,7 +36,7 @@ pub(crate) fn plan_block_delta(
         let shard_index = shard_for_key(shards, &op.key)?;
         let shard = shards
             .get(shard_index)
-            .ok_or(MhinStoreError::NoShardsConfigured)?;
+            .ok_or(StoreError::NoShardsConfigured)?;
 
         let shard_delta = &mut deltas[shard_index];
         shard_delta.operations.push(ShardOp {
@@ -87,7 +87,7 @@ pub(crate) fn plan_block_delta(
 
 fn shard_for_key(shards: &[Arc<dyn StateShard>], key: &Key) -> StoreResult<usize> {
     if shards.is_empty() {
-        return Err(MhinStoreError::NoShardsConfigured);
+        return Err(StoreError::NoShardsConfigured);
     }
 
     let shard_count = shards.len();

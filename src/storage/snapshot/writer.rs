@@ -3,7 +3,7 @@ use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::state_shard::StateShard;
 use crate::storage::fs::sync_directory;
 use crate::types::{BlockId, StoreKey as Key, ValueBuf, MAX_VALUE_BYTES};
@@ -66,7 +66,7 @@ pub(super) fn write_snapshot(
 
                 let value_bytes = value.as_slice();
                 if value_bytes.len() > MAX_VALUE_BYTES {
-                    write_result = Err(MhinStoreError::SnapshotCorrupted {
+                    write_result = Err(StoreError::SnapshotCorrupted {
                         path: tmp_path.clone(),
                         reason: format!(
                             "value length {} exceeds MAX_VALUE_BYTES",
@@ -87,7 +87,7 @@ pub(super) fn write_snapshot(
                     return;
                 }
 
-                let overflow_error = || MhinStoreError::SnapshotCorrupted {
+                let overflow_error = || StoreError::SnapshotCorrupted {
                     path: tmp_path.clone(),
                     reason: "snapshot size overflow while writing shard data".to_string(),
                 };
@@ -114,7 +114,7 @@ pub(super) fn write_snapshot(
                         count = next;
                     }
                     None => {
-                        write_result = Err(MhinStoreError::SnapshotCorrupted {
+                        write_result = Err(StoreError::SnapshotCorrupted {
                             path: tmp_path.clone(),
                             reason: "entry count overflow while streaming shard data".to_string(),
                         });
@@ -130,7 +130,7 @@ pub(super) fn write_snapshot(
         let section_size = section_bytes;
 
         current_offset = current_offset.checked_add(section_size).ok_or_else(|| {
-            MhinStoreError::SnapshotCorrupted {
+            StoreError::SnapshotCorrupted {
                 path: tmp_path.clone(),
                 reason: "snapshot size overflow while updating offsets".to_string(),
             }

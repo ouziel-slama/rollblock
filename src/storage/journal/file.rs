@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::storage::fs::sync_directory;
 use crate::types::{
     BlockId, BlockUndo, JournalMeta, Operation, ShardUndo, StoreKey, UndoEntry, UndoOp, Value,
@@ -307,7 +307,7 @@ impl FileBlockJournal {
     ) -> StoreResult<()> {
         let max_size = self.options.max_chunk_size_bytes;
         if bytes_required > max_size {
-            return Err(MhinStoreError::UnsupportedOperation {
+            return Err(StoreError::UnsupportedOperation {
                 reason: format!(
                     "journal chunk size {max_size} is smaller than required entry size {bytes_required}"
                 ),
@@ -323,7 +323,7 @@ impl FileBlockJournal {
             state
                 .chunk_id
                 .checked_add(1)
-                .ok_or_else(|| MhinStoreError::UnsupportedOperation {
+                .ok_or_else(|| StoreError::UnsupportedOperation {
                     reason: "exhausted journal chunk ids".to_string(),
                 })?;
         *state = self.create_chunk(next_chunk_id)?;
@@ -393,7 +393,7 @@ impl BlockJournal for FileBlockJournal {
         operations: &[Operation],
     ) -> StoreResult<JournalAppendOutcome> {
         if undo.block_height != block {
-            return Err(MhinStoreError::JournalBlockIdMismatch {
+            return Err(StoreError::JournalBlockIdMismatch {
                 expected: block,
                 found: undo.block_height,
             });
@@ -535,7 +535,7 @@ impl BlockJournal for FileBlockJournal {
 
     fn iter_backwards(&self, from: BlockId, to: BlockId) -> StoreResult<JournalIter> {
         if from < to {
-            return Err(MhinStoreError::InvalidBlockRange {
+            return Err(StoreError::InvalidBlockRange {
                 start: from,
                 end: to,
             });
@@ -886,7 +886,7 @@ mod tests {
         let undo = sample_undo(2);
         let err = journal.append(1, &undo, &[]).unwrap_err();
         match err {
-            MhinStoreError::JournalBlockIdMismatch { expected, found } => {
+            StoreError::JournalBlockIdMismatch { expected, found } => {
                 assert_eq!(expected, 1);
                 assert_eq!(found, 2);
             }
@@ -902,7 +902,7 @@ mod tests {
         let journal = FileBlockJournal::new(tmp.path()).unwrap();
 
         match journal.iter_backwards(1, 2) {
-            Err(MhinStoreError::InvalidBlockRange { start, end }) => {
+            Err(StoreError::InvalidBlockRange { start, end }) => {
                 assert_eq!(start, 1);
                 assert_eq!(end, 2);
             }
@@ -961,7 +961,7 @@ mod tests {
         let mut iter = journal.iter_backwards(block_height, block_height).unwrap();
         let err = iter.next_entry().unwrap().unwrap_err();
         match err {
-            MhinStoreError::JournalChecksumMismatch { block } => assert_eq!(block, block_height),
+            StoreError::JournalChecksumMismatch { block } => assert_eq!(block, block_height),
             other => panic!("unexpected error: {other:?}"),
         }
     }

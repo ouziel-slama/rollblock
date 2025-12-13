@@ -17,7 +17,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::block_journal::BlockJournal;
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::metadata::MetadataStore;
 use crate::metrics::StoreMetrics;
 use crate::snapshot::Snapshotter;
@@ -175,7 +175,7 @@ where
     pub fn enqueue(&self, task: Arc<PersistenceTask>) -> StoreResult<()> {
         match &self.runtime {
             Some(runtime) => runtime.enqueue(task),
-            None => Err(MhinStoreError::DurabilityFailure {
+            None => Err(StoreError::DurabilityFailure {
                 block: task.block_height,
                 reason: "persistence runtime is not initialized".to_string(),
             }),
@@ -237,7 +237,7 @@ where
         }
     }
 
-    pub fn fatal_error(&self) -> Option<MhinStoreError> {
+    pub fn fatal_error(&self) -> Option<StoreError> {
         self.runtime
             .as_ref()
             .and_then(|runtime| runtime.fatal_error())

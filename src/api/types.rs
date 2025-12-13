@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::api::error::MhinStoreError;
+use crate::api::error::StoreError;
 
 // Key width constants included from build-time generated files.
 // These are `pub const` in the included files, so they're automatically
@@ -87,9 +87,9 @@ impl StoreKey {
     /// Returns an error if the input slice length does not match
     /// `DEFAULT_KEY_BYTES`, preventing accidental truncation when the store
     /// is compiled with a larger key width.
-    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, MhinStoreError> {
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, StoreError> {
         if bytes.len() != DEFAULT_KEY_BYTES {
-            return Err(MhinStoreError::ConfigurationMismatch {
+            return Err(StoreError::ConfigurationMismatch {
                 field: "key_bytes",
                 stored: bytes.len(),
                 requested: DEFAULT_KEY_BYTES,
@@ -318,9 +318,9 @@ pub struct Value(ValueInner);
 
 impl Value {
     #[inline]
-    fn ensure_len_within_limit(len: usize) -> Result<(), MhinStoreError> {
+    fn ensure_len_within_limit(len: usize) -> Result<(), StoreError> {
         if len > MAX_VALUE_BYTES {
-            Err(MhinStoreError::ValueTooLarge {
+            Err(StoreError::ValueTooLarge {
                 actual: len,
                 max: MAX_VALUE_BYTES,
             })
@@ -330,19 +330,19 @@ impl Value {
     }
 
     /// Creates a value from owned bytes while validating the payload length.
-    pub fn try_from_vec(bytes: Vec<u8>) -> Result<Self, MhinStoreError> {
+    pub fn try_from_vec(bytes: Vec<u8>) -> Result<Self, StoreError> {
         Self::ensure_len_within_limit(bytes.len())?;
         Ok(Self(ValueInner::from_vec(bytes)))
     }
 
     /// Clones the provided slice into a new value while validating the length.
-    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, MhinStoreError> {
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, StoreError> {
         Self::ensure_len_within_limit(bytes.len())?;
         Ok(Self(ValueInner::from_slice(bytes)))
     }
 
     /// Ensures the current payload stays within the configured limit.
-    pub fn ensure_within_limit(&self) -> Result<(), MhinStoreError> {
+    pub fn ensure_within_limit(&self) -> Result<(), StoreError> {
         Self::ensure_len_within_limit(self.len())
     }
 
@@ -613,7 +613,7 @@ mod tests {
         let too_short = [0u8; MIN_KEY_BYTES - 1];
         let err = StoreKey::try_from_slice(&too_short).unwrap_err();
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,
@@ -644,7 +644,7 @@ mod tests {
         let oversized = vec![0u8; MAX_VALUE_BYTES + 1];
         let err = Value::try_from_vec(oversized).unwrap_err();
         match err {
-            MhinStoreError::ValueTooLarge { actual, max } => {
+            StoreError::ValueTooLarge { actual, max } => {
                 assert_eq!(actual, MAX_VALUE_BYTES + 1);
                 assert_eq!(max, MAX_VALUE_BYTES);
             }

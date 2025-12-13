@@ -150,7 +150,7 @@ Choose based on your durability requirements. Most blockchain indexers can affor
 
 ```rust
 use std::time::Duration;
-use rollblock::{MhinStoreFacade, StoreConfig};
+use rollblock::{SimpleStoreFacade, StoreConfig};
 use rollblock::orchestrator::DurabilityMode;
 
 let config = StoreConfig::new(
@@ -165,7 +165,7 @@ let config = StoreConfig::new(
 .with_min_rollback_window(1000)?            // 1 000 blocks for reorgs
 .with_snapshot_interval(Duration::from_secs(1800)); // snapshot every 30 min
 
-let store = MhinStoreFacade::new(config)?;
+let store = SimpleStoreFacade::new(config)?;
 ```
 
 ---

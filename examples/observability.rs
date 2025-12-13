@@ -5,7 +5,7 @@
 
 use rollblock::metrics::HealthState;
 use rollblock::types::{Operation, StoreKey as Key, Value};
-use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+use rollblock::{SimpleStoreFacade, StoreConfig, StoreFacade};
 
 fn key_from_u8(i: u8) -> Key {
     Key::from_prefix([i, 0, 0, 0, 0, 0, 0, 0])
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?
     .without_remote_server();
 
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     // Check initial health
     println!("📊 Initial Health Check");

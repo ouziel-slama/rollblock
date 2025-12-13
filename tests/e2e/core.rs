@@ -270,7 +270,7 @@ fn set_rejects_values_over_max_bytes() {
     let oversized = vec![0u8; MAX_VALUE_BYTES + 1];
     let err = Value::try_from_vec(oversized).unwrap_err();
     match err {
-        rollblock::MhinStoreError::ValueTooLarge { actual, max } => {
+        rollblock::StoreError::ValueTooLarge { actual, max } => {
             assert_eq!(actual, MAX_VALUE_BYTES + 1);
             assert_eq!(max, MAX_VALUE_BYTES);
         }

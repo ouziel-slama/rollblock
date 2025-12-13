@@ -19,7 +19,7 @@ use tokio::time::{timeout, Instant};
 use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig as TlsServerConfig};
 use tokio_rustls::TlsAcceptor;
 
-use crate::facade::{MhinStoreFacade, StoreFacade};
+use crate::facade::{SimpleStoreFacade, StoreFacade};
 use crate::types::{StoreKey as Key, Value, MAX_VALUE_BYTES};
 
 use super::BasicAuthConfig;
@@ -86,7 +86,7 @@ pub enum RemoteServerSecurity {
 
 impl RemoteStoreServer {
     /// Creates a new server instance bound to the provided store.
-    pub fn new(store: MhinStoreFacade, config: RemoteServerConfig) -> Result<Self, ServerError> {
+    pub fn new(store: SimpleStoreFacade, config: RemoteServerConfig) -> Result<Self, ServerError> {
         if config.max_connections == 0 {
             return Err(ServerError::InvalidConfig(
                 "max_connections must be greater than zero".into(),
@@ -233,7 +233,7 @@ struct ServerLimits {
 
 #[derive(Clone)]
 struct ServerState {
-    store: MhinStoreFacade,
+    store: SimpleStoreFacade,
     expected_auth_header: String,
     request_timeout: Duration,
     idle_timeout: Duration,
@@ -840,7 +840,7 @@ mod tests {
         orchestrator.put([1u8; Key::BYTES].into(), 7.into());
         orchestrator.put([2u8; Key::BYTES].into(), 19.into());
 
-        let facade = MhinStoreFacade::new_for_testing(
+        let facade = SimpleStoreFacade::new_for_testing(
             orchestrator.clone(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicUsize::new(1)),

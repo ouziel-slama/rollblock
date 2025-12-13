@@ -5,7 +5,7 @@ use std::time::Duration;
 use heed::Error as HeedError;
 use heed::MdbError;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::metadata::LmdbMetadataStore;
 use crate::net::{BasicAuthConfig, RemoteServerConfig, RemoteServerSecurity};
 use crate::orchestrator::DurabilityMode;
@@ -15,7 +15,7 @@ use crate::types::BlockId;
 pub(crate) const DEFAULT_REMOTE_USERNAME: &str = "proto";
 pub(crate) const DEFAULT_REMOTE_PASSWORD: &str = "proto";
 
-/// Settings that control the embedded remote server started by `MhinStoreFacade`.
+/// Settings that control the embedded remote server started by `SimpleStoreFacade`.
 /// Defaults bind to `127.0.0.1:9443`, use plaintext transport, and ship placeholder
 /// `proto`/`proto` credentials so local development can override them quickly. The
 /// server refuses to start until [`RemoteServerSettings::with_basic_auth`] (or
@@ -131,12 +131,12 @@ impl StoreConfig {
     /// New configurations default to `DurabilityMode::Async { max_pending_blocks: 1024 }`,
     /// which acknowledges blocks as soon as they enter the persistence queue. Call
     /// [`StoreConfig::with_durability_mode`] with [`DurabilityMode::Synchronous`] (or
-    /// invoke [`crate::facade::MhinStoreFacade::disable_relaxed_mode`] at runtime) if you require
+    /// invoke [`crate::facade::SimpleStoreFacade::disable_relaxed_mode`] at runtime) if you require
     /// an fsync after every block.
     ///
     /// # Errors
     ///
-    /// Returns [`MhinStoreError::InvalidConfiguration`] if:
+    /// Returns [`StoreError::InvalidConfiguration`] if:
     /// - `shards_count` is 0
     /// - `initial_capacity` is 0
     /// - `thread_count` is 0
@@ -160,21 +160,21 @@ impl StoreConfig {
         use_compression: bool,
     ) -> StoreResult<Self> {
         if shards_count == 0 {
-            return Err(MhinStoreError::InvalidConfiguration {
+            return Err(StoreError::InvalidConfiguration {
                 field: "shards_count",
                 min: 1,
                 value: 0,
             });
         }
         if initial_capacity == 0 {
-            return Err(MhinStoreError::InvalidConfiguration {
+            return Err(StoreError::InvalidConfiguration {
                 field: "initial_capacity",
                 min: 1,
                 value: 0,
             });
         }
         if thread_count == 0 {
-            return Err(MhinStoreError::InvalidConfiguration {
+            return Err(StoreError::InvalidConfiguration {
                 field: "thread_count",
                 min: 1,
                 value: 0,
@@ -213,7 +213,7 @@ impl StoreConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`MhinStoreError::InvalidConfiguration`] if `shards_count` or
+    /// Returns [`StoreError::InvalidConfiguration`] if `shards_count` or
     /// `initial_capacity` is 0.
     pub fn with_shard_layout(
         mut self,
@@ -221,14 +221,14 @@ impl StoreConfig {
         initial_capacity: usize,
     ) -> StoreResult<Self> {
         if shards_count == 0 {
-            return Err(MhinStoreError::InvalidConfiguration {
+            return Err(StoreError::InvalidConfiguration {
                 field: "shards_count",
                 min: 1,
                 value: 0,
             });
         }
         if initial_capacity == 0 {
-            return Err(MhinStoreError::InvalidConfiguration {
+            return Err(StoreError::InvalidConfiguration {
                 field: "initial_capacity",
                 min: 1,
                 value: 0,
@@ -288,7 +288,7 @@ impl StoreConfig {
 
     pub fn with_min_rollback_window(mut self, window: BlockId) -> StoreResult<Self> {
         if window == 0 {
-            return Err(MhinStoreError::InvalidConfiguration {
+            return Err(StoreError::InvalidConfiguration {
                 field: "min_rollback_window",
                 min: 1,
                 value: 0,
@@ -300,7 +300,7 @@ impl StoreConfig {
 
     pub fn with_prune_interval(mut self, interval: Duration) -> StoreResult<Self> {
         if interval.is_zero() {
-            return Err(MhinStoreError::InvalidConfiguration {
+            return Err(StoreError::InvalidConfiguration {
                 field: "prune_interval",
                 min: 1,
                 value: 0,
@@ -312,7 +312,7 @@ impl StoreConfig {
 
     pub fn with_bootstrap_block_profile(mut self, blocks_per_chunk: u64) -> StoreResult<Self> {
         if blocks_per_chunk == 0 {
-            return Err(MhinStoreError::InvalidConfiguration {
+            return Err(StoreError::InvalidConfiguration {
                 field: "bootstrap_block_profile",
                 min: 1,
                 value: 0,
@@ -440,7 +440,7 @@ impl StoreConfig {
     }
 
     /// Enables or customizes the embedded remote server that
-    /// `MhinStoreFacade::new` manages automatically. Calling this method also
+    /// `SimpleStoreFacade::new` manages automatically. Calling this method also
     /// flips [`StoreConfig::enable_server`] to `true`.
     pub fn with_remote_server(mut self, settings: RemoteServerSettings) -> Self {
         self.remote_server = Some(settings);
@@ -454,7 +454,7 @@ impl StoreConfig {
     /// with [`StoreConfig::without_remote_server`].
     pub fn enable_remote_server(mut self) -> StoreResult<Self> {
         if self.remote_server.is_none() {
-            return Err(MhinStoreError::RemoteServerConfigMissing);
+            return Err(StoreError::RemoteServerConfigMissing);
         }
         self.enable_server = true;
         Ok(self)
@@ -516,10 +516,10 @@ impl StoreConfig {
         }
     }
 
-    fn should_retry_with_larger_map(error: &MhinStoreError) -> bool {
+    fn should_retry_with_larger_map(error: &StoreError) -> bool {
         matches!(
             error,
-            MhinStoreError::Heed(HeedError::Mdb(MdbError::MapFull | MdbError::MapResized))
+            StoreError::Heed(HeedError::Mdb(MdbError::MapFull | MdbError::MapResized))
         )
     }
     fn existing_from_base(mut config: Self) -> Self {
@@ -749,7 +749,7 @@ mod tests {
             .enable_remote_server()
             .expect_err("settings removed");
 
-        assert!(matches!(error, MhinStoreError::RemoteServerConfigMissing));
+        assert!(matches!(error, StoreError::RemoteServerConfigMissing));
     }
 
     #[test]
@@ -759,7 +759,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            MhinStoreError::InvalidConfiguration {
+            StoreError::InvalidConfiguration {
                 field: "shards_count",
                 min: 1,
                 value: 0,
@@ -774,7 +774,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            MhinStoreError::InvalidConfiguration {
+            StoreError::InvalidConfiguration {
                 field: "initial_capacity",
                 min: 1,
                 value: 0,
@@ -789,7 +789,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            MhinStoreError::InvalidConfiguration {
+            StoreError::InvalidConfiguration {
                 field: "thread_count",
                 min: 1,
                 value: 0,
@@ -808,7 +808,7 @@ mod tests {
             .expect_err("zero shards");
         assert!(matches!(
             error,
-            MhinStoreError::InvalidConfiguration {
+            StoreError::InvalidConfiguration {
                 field: "shards_count",
                 ..
             }
@@ -817,7 +817,7 @@ mod tests {
         let error = config.with_shard_layout(4, 0).expect_err("zero capacity");
         assert!(matches!(
             error,
-            MhinStoreError::InvalidConfiguration {
+            StoreError::InvalidConfiguration {
                 field: "initial_capacity",
                 ..
             }
@@ -839,7 +839,7 @@ mod tests {
             .expect_err("zero window rejected");
         assert!(matches!(
             err,
-            MhinStoreError::InvalidConfiguration {
+            StoreError::InvalidConfiguration {
                 field: "min_rollback_window",
                 ..
             }
@@ -855,7 +855,7 @@ mod tests {
             .expect_err("zero interval rejected");
         assert!(matches!(
             err,
-            MhinStoreError::InvalidConfiguration {
+            StoreError::InvalidConfiguration {
                 field: "prune_interval",
                 ..
             }
@@ -871,7 +871,7 @@ mod tests {
             .expect_err("zero profile rejected");
         assert!(matches!(
             err,
-            MhinStoreError::InvalidConfiguration {
+            StoreError::InvalidConfiguration {
                 field: "bootstrap_block_profile",
                 ..
             }

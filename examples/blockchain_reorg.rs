@@ -6,7 +6,7 @@
 //! Run with: cargo run --example blockchain_reorg
 
 use rollblock::types::{Operation, StoreKey as Key};
-use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+use rollblock::{SimpleStoreFacade, StoreConfig, StoreFacade};
 
 fn acct(id: u8) -> Key {
     Key::from_prefix([id, 0, 0, 0, 0, 0, 0, 0])
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .without_remote_server();
 
     println!("📦 Creating store with manual reorg handling\n");
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     // Simulate initial blockchain state
     println!("📖 Building initial chain:\n");

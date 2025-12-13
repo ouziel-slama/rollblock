@@ -4,7 +4,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
 
 use crate::block_journal::{FileBlockJournal, JournalOptions, SyncPolicy};
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::metadata::LmdbMetadataStore;
 use crate::net::{RemoteServerHandle, RemoteStoreServer, ServerError, ServerMetricsSnapshot};
 use crate::orchestrator::{BlockOrchestrator, DefaultBlockOrchestrator, DurabilityMode};
@@ -28,7 +28,7 @@ use super::StoreFacade;
 ///
 /// This is the primary entry point for all store operations. It manages
 /// the lifecycle of internal components and provides a thread-safe interface.
-pub struct MhinStoreFacade {
+pub struct SimpleStoreFacade {
     orchestrator: Arc<dyn BlockOrchestrator>,
     metadata: Option<Arc<LmdbMetadataStore>>,
     durability_mode: Arc<RwLock<DurabilityMode>>,
@@ -38,7 +38,7 @@ pub struct MhinStoreFacade {
     remote_server: Option<RemoteServerController>,
 }
 
-impl Clone for MhinStoreFacade {
+impl Clone for SimpleStoreFacade {
     fn clone(&self) -> Self {
         self.handle_count.fetch_add(1, Ordering::AcqRel);
         Self {
@@ -53,7 +53,7 @@ impl Clone for MhinStoreFacade {
     }
 }
 
-impl MhinStoreFacade {
+impl SimpleStoreFacade {
     /// Creates a new store instance from a configuration.
     ///
     /// This initializes all internal components including:
@@ -72,10 +72,10 @@ impl MhinStoreFacade {
     /// # Examples
     ///
     /// ```ignore
-    /// use rollblock::{MhinStoreFacade, StoreConfig};
+    /// use rollblock::{SimpleStoreFacade, StoreConfig};
     ///
     /// let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
-    /// let store = MhinStoreFacade::new(config)?;
+    /// let store = SimpleStoreFacade::new(config)?;
     /// ```
     pub fn new(config: StoreConfig) -> StoreResult<Self> {
         let lock = StoreLockGuard::acquire(&config.data_dir)?;
@@ -579,7 +579,7 @@ impl MhinStoreFacade {
     }
 }
 
-impl StoreFacade for MhinStoreFacade {
+impl StoreFacade for SimpleStoreFacade {
     fn set(&self, block_height: BlockId, operations: Vec<Operation>) -> StoreResult<()> {
         for op in operations.iter() {
             op.value.ensure_within_limit()?;
@@ -604,19 +604,19 @@ impl StoreFacade for MhinStoreFacade {
     }
 
     fn enable_relaxed_mode(&self, sync_every_n_blocks: usize) -> StoreResult<()> {
-        MhinStoreFacade::enable_relaxed_mode(self, sync_every_n_blocks)
+        SimpleStoreFacade::enable_relaxed_mode(self, sync_every_n_blocks)
     }
 
     fn relaxed_mode_enabled(&self) -> bool {
-        MhinStoreFacade::relaxed_mode_enabled(self)
+        SimpleStoreFacade::relaxed_mode_enabled(self)
     }
 
     fn disable_relaxed_mode(&self) -> StoreResult<()> {
-        MhinStoreFacade::disable_relaxed_mode(self)
+        SimpleStoreFacade::disable_relaxed_mode(self)
     }
 
     fn close(&self) -> StoreResult<()> {
-        MhinStoreFacade::close(self)
+        SimpleStoreFacade::close(self)
     }
 
     fn current_block(&self) -> StoreResult<BlockId> {
@@ -624,7 +624,7 @@ impl StoreFacade for MhinStoreFacade {
     }
 
     fn applied_block(&self) -> StoreResult<BlockId> {
-        MhinStoreFacade::applied_block(self)
+        SimpleStoreFacade::applied_block(self)
     }
 
     fn durable_block(&self) -> StoreResult<BlockId> {
@@ -636,7 +636,7 @@ impl StoreFacade for MhinStoreFacade {
     }
 }
 
-impl Drop for MhinStoreFacade {
+impl Drop for SimpleStoreFacade {
     fn drop(&mut self) {
         if self.handle_count.fetch_sub(1, Ordering::AcqRel) != 1 {
             return;
@@ -699,11 +699,11 @@ struct RemoteServerShared {
 }
 
 impl RemoteServerController {
-    fn spawn(store: &MhinStoreFacade, settings: RemoteServerSettings) -> StoreResult<Self> {
+    fn spawn(store: &SimpleStoreFacade, settings: RemoteServerSettings) -> StoreResult<Self> {
         let username_missing = settings.auth.username.trim().is_empty();
         let password_missing = settings.auth.password.trim().is_empty();
         if username_missing || password_missing || settings.uses_default_auth() {
-            return Err(MhinStoreError::RemoteServerCredentialsMissing);
+            return Err(StoreError::RemoteServerCredentialsMissing);
         }
 
         let worker_threads = settings.worker_threads.max(1);
@@ -741,17 +741,17 @@ impl RemoteServerController {
                         .await
                 })
             })
-            .map_err(|err| MhinStoreError::RemoteServerTaskFailure {
+            .map_err(|err| StoreError::RemoteServerTaskFailure {
                 reason: format!("failed to spawn remote server thread: {err}"),
             })?;
 
         if startup_rx.recv().map_err(|_| ()) != Ok(Ok(())) {
             let err = match thread.join() {
-                Ok(Ok(())) => MhinStoreError::RemoteServerTaskFailure {
+                Ok(Ok(())) => StoreError::RemoteServerTaskFailure {
                     reason: "remote server thread exited before reporting status".into(),
                 },
-                Ok(Err(server_err)) => MhinStoreError::from(server_err),
-                Err(panic) => MhinStoreError::RemoteServerTaskFailure {
+                Ok(Err(server_err)) => StoreError::from(server_err),
+                Err(panic) => StoreError::RemoteServerTaskFailure {
                     reason: describe_panic(panic),
                 },
             };
@@ -785,8 +785,8 @@ impl RemoteServerShared {
         if let Some(thread) = self.thread.lock().unwrap().take() {
             match thread.join() {
                 Ok(Ok(())) => Ok(()),
-                Ok(Err(err)) => Err(MhinStoreError::from(err)),
-                Err(panic) => Err(MhinStoreError::RemoteServerTaskFailure {
+                Ok(Err(err)) => Err(StoreError::from(err)),
+                Err(panic) => Err(StoreError::RemoteServerTaskFailure {
                     reason: describe_panic(panic),
                 }),
             }

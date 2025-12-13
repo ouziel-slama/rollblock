@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use rayon::ThreadPool;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::state::shard::StateShard;
 use crate::types::{BlockDelta, BlockId, BlockUndo, ShardDelta, ShardUndo, StateStats};
 
@@ -13,7 +13,7 @@ pub(crate) fn commit_block(
     delta: BlockDelta,
 ) -> StoreResult<(StateStats, BlockUndo)> {
     if delta.block_height != block_height {
-        return Err(MhinStoreError::BlockDeltaMismatch {
+        return Err(StoreError::BlockDeltaMismatch {
             expected: block_height,
             found: delta.block_height,
         });
@@ -67,7 +67,7 @@ pub(crate) fn revert_block(
     undo: BlockUndo,
 ) -> StoreResult<()> {
     if undo.block_height != block_height {
-        return Err(MhinStoreError::BlockDeltaMismatch {
+        return Err(StoreError::BlockDeltaMismatch {
             expected: block_height,
             found: undo.block_height,
         });
@@ -101,7 +101,7 @@ fn process_shard_commit(
 ) -> StoreResult<(usize, usize, Option<ShardUndo>)> {
     let shard = shards
         .get(shard_delta.shard_index)
-        .ok_or(MhinStoreError::InvalidShardIndex {
+        .ok_or(StoreError::InvalidShardIndex {
             shard_index: shard_delta.shard_index,
             shard_count: shards.len(),
         })?;
@@ -129,7 +129,7 @@ fn process_shard_commit(
 fn process_shard_revert(shards: &[Arc<dyn StateShard>], shard_undo: &ShardUndo) -> StoreResult<()> {
     let shard = shards
         .get(shard_undo.shard_index)
-        .ok_or(MhinStoreError::InvalidShardIndex {
+        .ok_or(StoreError::InvalidShardIndex {
             shard_index: shard_undo.shard_index,
             shard_count: shards.len(),
         })?;

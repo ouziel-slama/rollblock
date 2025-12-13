@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use rayon::ThreadPool;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::metadata::MetadataStore;
 use crate::state::shard::StateShard;
 #[cfg(test)]
@@ -112,11 +112,11 @@ where
         undo: &BlockUndo,
     ) -> StoreResult<()> {
         if self.shards.is_empty() {
-            return Err(MhinStoreError::NoShardsConfigured);
+            return Err(StoreError::NoShardsConfigured);
         }
 
         if undo.block_height != block_height {
-            return Err(MhinStoreError::BlockDeltaMismatch {
+            return Err(StoreError::BlockDeltaMismatch {
                 expected: block_height,
                 found: undo.block_height,
             });
@@ -124,7 +124,7 @@ where
 
         let delta = plan_replay_delta(block_height, operations, undo, |key| {
             self.shard_index_for_key(key)
-                .ok_or(MhinStoreError::NoShardsConfigured)
+                .ok_or(StoreError::NoShardsConfigured)
         })?;
 
         if let Some(block_delta) = delta {
@@ -144,7 +144,7 @@ where
 
     fn prepare_journal(&self, block_height: BlockId, ops: &[Operation]) -> StoreResult<BlockDelta> {
         if self.shards.is_empty() {
-            return Err(MhinStoreError::NoShardsConfigured);
+            return Err(StoreError::NoShardsConfigured);
         }
 
         plan_block_delta(&self.shards, block_height, ops)
@@ -156,7 +156,7 @@ where
         delta: BlockDelta,
     ) -> StoreResult<(StateStats, BlockUndo)> {
         if self.shards.is_empty() {
-            return Err(MhinStoreError::NoShardsConfigured);
+            return Err(StoreError::NoShardsConfigured);
         }
 
         commit_block(&self.shards, self.thread_pool.as_ref(), block_height, delta)
@@ -164,7 +164,7 @@ where
 
     fn revert(&self, block_height: BlockId, undo: BlockUndo) -> StoreResult<()> {
         if self.shards.is_empty() {
-            return Err(MhinStoreError::NoShardsConfigured);
+            return Err(StoreError::NoShardsConfigured);
         }
 
         revert_block(&self.shards, self.thread_pool.as_ref(), block_height, undo)
@@ -252,7 +252,7 @@ mod tests {
     use std::sync::Mutex;
     use xxhash_rust::xxh3::xxh3_64;
 
-    use crate::error::MhinStoreError;
+    use crate::error::StoreError;
     use crate::metadata::GcWatermark;
     use crate::state::shard::{RawTableShard, StateShard};
     use crate::types::{JournalMeta, ShardDelta, ShardOp, ShardUndo, UndoOp};
@@ -298,7 +298,7 @@ mod tests {
             let start = *range.start();
             let end = *range.end();
             if start > end {
-                return Err(MhinStoreError::InvalidBlockRange { start, end });
+                return Err(StoreError::InvalidBlockRange { start, end });
             }
 
             Ok(self
@@ -402,7 +402,7 @@ mod tests {
         let metadata = Arc::new(MemoryMetadataStore::default());
         let engine = ShardedStateEngine::new(Vec::new(), metadata);
         let err = engine.prepare_journal(1, &[]).unwrap_err();
-        assert!(matches!(err, MhinStoreError::NoShardsConfigured));
+        assert!(matches!(err, StoreError::NoShardsConfigured));
     }
 
     #[test]
@@ -533,7 +533,7 @@ mod tests {
         let err = engine.commit(2, delta).unwrap_err();
         assert!(matches!(
             err,
-            MhinStoreError::BlockDeltaMismatch {
+            StoreError::BlockDeltaMismatch {
                 expected: 2,
                 found: 3
             }
@@ -554,7 +554,7 @@ mod tests {
         let err = engine.revert(1, undo).unwrap_err();
         assert!(matches!(
             err,
-            MhinStoreError::BlockDeltaMismatch {
+            StoreError::BlockDeltaMismatch {
                 expected: 1,
                 found: 4
             }
@@ -583,7 +583,7 @@ mod tests {
         let err = engine.commit(1, delta).unwrap_err();
         assert!(matches!(
             err,
-            MhinStoreError::InvalidShardIndex {
+            StoreError::InvalidShardIndex {
                 shard_index: 5,
                 shard_count: 1
             }
@@ -607,7 +607,7 @@ mod tests {
         let err = engine.revert(1, undo).unwrap_err();
         assert!(matches!(
             err,
-            MhinStoreError::InvalidShardIndex {
+            StoreError::InvalidShardIndex {
                 shard_index: 3,
                 shard_count: 1
             }
@@ -633,7 +633,7 @@ mod tests {
         };
 
         let err = engine.commit(1, delta).unwrap_err();
-        assert!(matches!(err, MhinStoreError::NoShardsConfigured));
+        assert!(matches!(err, StoreError::NoShardsConfigured));
     }
 
     #[test]
@@ -646,7 +646,7 @@ mod tests {
         };
 
         let err = engine.revert(1, undo).unwrap_err();
-        assert!(matches!(err, MhinStoreError::NoShardsConfigured));
+        assert!(matches!(err, StoreError::NoShardsConfigured));
     }
 
     #[test]

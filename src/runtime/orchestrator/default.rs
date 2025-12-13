@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::block_journal::{BlockJournal, SyncPolicy};
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::metadata::MetadataStore;
 use crate::snapshot::Snapshotter;
 use crate::state_engine::StateEngine;
@@ -153,7 +153,7 @@ where
 
     fn check_health(&self) -> StoreResult<()> {
         if let Some((block, reason)) = self.fatal_error.lock().clone() {
-            return Err(MhinStoreError::DurabilityFailure { block, reason });
+            return Err(StoreError::DurabilityFailure { block, reason });
         }
         self.persistence.ensure_healthy()
     }
@@ -169,7 +169,7 @@ where
 
         if block_height <= current && !allow_genesis_zero {
             self.persistence.metrics().record_failure();
-            return Err(MhinStoreError::BlockIdNotIncreasing {
+            return Err(StoreError::BlockIdNotIncreasing {
                 block_height,
                 current,
             });
@@ -484,7 +484,7 @@ where
         &self,
         block_height: BlockId,
         block_undo: Arc<BlockUndo>,
-        err: MhinStoreError,
+        err: StoreError,
         operation_count: usize,
     ) -> StoreResult<()> {
         self.persistence.metrics().record_failure();
@@ -526,7 +526,7 @@ where
     fn revert_to_internal(&self, block: BlockId) -> StoreResult<()> {
         let current_applied = self.persistence.applied_block_height();
         if block > current_applied {
-            return Err(MhinStoreError::RollbackTargetAhead {
+            return Err(StoreError::RollbackTargetAhead {
                 target: block,
                 current: current_applied,
             });

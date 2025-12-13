@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::types::BlockId;
 
 use super::task::PersistenceTask;
@@ -36,7 +36,7 @@ impl PersistenceQueue {
         }
         if self.stopped.load(Ordering::Acquire) {
             task.mark_cancelled();
-            return Err(MhinStoreError::DurabilityFailure {
+            return Err(StoreError::DurabilityFailure {
                 block: task.block_height,
                 reason: "persistence runtime has stopped".to_string(),
             });

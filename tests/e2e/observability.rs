@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use rollblock::metrics::HealthState;
 use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::Value;
-use rollblock::{DurabilityMode, MhinStoreError, StoreFacade, StoreResult};
+use rollblock::{DurabilityMode, StoreError, StoreFacade, StoreResult};
 
 use super::e2e_support::{
     apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT,
@@ -85,7 +85,7 @@ fn e2e_metrics_health() -> StoreResult<()> {
     .expect_err("set should fail when journal directory is missing");
 
     match failure {
-        MhinStoreError::Io(_) | MhinStoreError::DurabilityFailure { .. } => {}
+        StoreError::Io(_) | StoreError::DurabilityFailure { .. } => {}
         other => panic!("unexpected error: {other:?}"),
     }
 
@@ -160,7 +160,7 @@ fn e2e_error_propagation() -> StoreResult<()> {
     };
 
     match failure_err {
-        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
+        StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
         other => panic!("unexpected error: {other:?}"),
     }
 

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::error::MhinStoreError;
+use crate::error::StoreError;
 use crate::types::{BlockId, BlockUndo, Operation};
 
 /// Context captured when applying a block so that metrics can be recorded later.
@@ -43,7 +43,7 @@ pub enum TaskStatus {
     Pending,
     Persisting,
     Cancelled,
-    Completed(Result<(), Arc<MhinStoreError>>),
+    Completed(Result<(), Arc<StoreError>>),
 }
 
 /// Work item queued for the persistence runtime.
@@ -94,7 +94,7 @@ impl PersistenceTask {
         self.status_cv.notify_all();
     }
 
-    pub fn wait_completion(&self) -> Result<(), Arc<MhinStoreError>> {
+    pub fn wait_completion(&self) -> Result<(), Arc<StoreError>> {
         let mut status = self.status.lock();
         loop {
             match &*status {

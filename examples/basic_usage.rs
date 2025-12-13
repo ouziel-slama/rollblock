@@ -3,7 +3,7 @@
 //! Run with: cargo run --example basic_usage
 
 use rollblock::types::{Operation, StoreKey as Key, Value};
-use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+use rollblock::{SimpleStoreFacade, StoreConfig, StoreFacade};
 
 fn key(byte: u8) -> Key {
     Key::from_prefix([byte, 0, 0, 0, 0, 0, 0, 0])
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   - Shards: 4");
     println!("   - Initial capacity: 1000 per shard\n");
 
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     // Example 1: SET a new key-value pair
     println!("✏️  Block 1: Setting key [1,0,0,0,0,0,0,0] = 100");

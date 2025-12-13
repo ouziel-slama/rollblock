@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use rollblock::block_journal::SyncPolicy;
-use rollblock::error::MhinStoreError;
+use rollblock::error::StoreError;
 use rollblock::orchestrator::{BlockOrchestrator, DefaultBlockOrchestrator};
 use rollblock::state_engine::ShardedStateEngine;
 use rollblock::state_shard::{RawTableShard, StateShard};
@@ -516,14 +516,14 @@ fn block_height_must_be_increasing() {
     let result = orchestrator.apply_operations(100, vec![operation(key_a, 20)]);
     assert!(matches!(
         result,
-        Err(MhinStoreError::BlockIdNotIncreasing { .. })
+        Err(StoreError::BlockIdNotIncreasing { .. })
     ));
 
     // Try to use block 50 (less than current)
     let result = orchestrator.apply_operations(50, vec![operation(key_a, 20)]);
     assert!(matches!(
         result,
-        Err(MhinStoreError::BlockIdNotIncreasing { .. })
+        Err(StoreError::BlockIdNotIncreasing { .. })
     ));
 
     // Block 101 should work
@@ -570,10 +570,7 @@ fn allows_genesis_block_zero_once() {
 
     let second_zero = orchestrator.apply_operations(0, vec![operation(key, 42)]);
     assert!(
-        matches!(
-            second_zero,
-            Err(MhinStoreError::BlockIdNotIncreasing { .. })
-        ),
+        matches!(second_zero, Err(StoreError::BlockIdNotIncreasing { .. })),
         "block 0 should only be accepted once"
     );
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::block_journal::BlockJournal;
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::metadata::{LmdbMetadataStore, MetadataStore, ShardLayout};
 use crate::snapshot::{MmapSnapshotter, Snapshotter};
 use crate::state_engine::{ShardedStateEngine, SHARD_HASH_VERSION};
@@ -78,7 +78,7 @@ pub(crate) fn restore_existing_state(
 
                 return Ok(loaded_block);
             }
-            Err(MhinStoreError::SnapshotCorrupted { reason, .. }) => {
+            Err(StoreError::SnapshotCorrupted { reason, .. }) => {
                 tracing::warn!(
                     block_height = snapshot_block,
                     path = ?path,
@@ -133,7 +133,7 @@ where
     let start_block = restored_block.saturating_add(1);
     let mut metas = metadata.get_journal_offsets(start_block..=target_block)?;
     if metas.is_empty() {
-        return Err(MhinStoreError::MissingJournalEntry { block: start_block });
+        return Err(StoreError::MissingJournalEntry { block: start_block });
     }
 
     metas.sort_by_key(|meta| meta.block_height);
@@ -171,7 +171,7 @@ where
             missing_blocks = ?missing_blocks,
             "Detected gaps between metadata and journal during recovery"
         );
-        return Err(MhinStoreError::MissingJournalEntry { block: missing });
+        return Err(StoreError::MissingJournalEntry { block: missing });
     }
 
     for meta in metas {
@@ -326,7 +326,7 @@ where
                 }
             }
             Err(err) if Some(block_height) == tail_block => {
-                if matches!(err, MhinStoreError::JournalChecksumMismatch { .. }) {
+                if matches!(err, StoreError::JournalChecksumMismatch { .. }) {
                     return Err(err);
                 }
                 tracing::warn!(
@@ -367,7 +367,7 @@ pub(crate) fn resolve_shard_layout(
     if let Some(stored) = metadata.load_shard_layout()? {
         if let Some(requested) = config.shards_count {
             if requested != stored.shards_count {
-                return Err(MhinStoreError::ConfigurationMismatch {
+                return Err(StoreError::ConfigurationMismatch {
                     field: "shards_count",
                     stored: stored.shards_count,
                     requested,
@@ -377,7 +377,7 @@ pub(crate) fn resolve_shard_layout(
 
         if let Some(requested) = config.initial_capacity {
             if requested != stored.initial_capacity {
-                return Err(MhinStoreError::ConfigurationMismatch {
+                return Err(StoreError::ConfigurationMismatch {
                     field: "initial_capacity",
                     stored: stored.initial_capacity,
                     requested,
@@ -386,7 +386,7 @@ pub(crate) fn resolve_shard_layout(
         }
 
         if stored.key_bytes != crate::types::StoreKey::BYTES {
-            return Err(MhinStoreError::ConfigurationMismatch {
+            return Err(StoreError::ConfigurationMismatch {
                 field: "key_bytes",
                 stored: stored.key_bytes,
                 requested: crate::types::StoreKey::BYTES,
@@ -398,7 +398,7 @@ pub(crate) fn resolve_shard_layout(
                 current_hash_version = SHARD_HASH_VERSION,
                 "Stored shard layout missing hash version; refusing to continue"
             );
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field: "shard_hash_version",
                 stored: 0,
                 requested: SHARD_HASH_VERSION as usize,
@@ -411,7 +411,7 @@ pub(crate) fn resolve_shard_layout(
                 current_hash_version = SHARD_HASH_VERSION,
                 "Shard hash version mismatch"
             );
-            return Err(MhinStoreError::ConfigurationMismatch {
+            return Err(StoreError::ConfigurationMismatch {
                 field: "shard_hash_version",
                 stored: stored_hash_version as usize,
                 requested: SHARD_HASH_VERSION as usize,
@@ -424,12 +424,12 @@ pub(crate) fn resolve_shard_layout(
     let shards_count = match config.shards_count {
         Some(value) => value,
         None if allow_persist => {
-            return Err(MhinStoreError::MissingShardConfig {
+            return Err(StoreError::MissingShardConfig {
                 field: "shards_count",
             })
         }
         None => {
-            return Err(MhinStoreError::MissingShardLayout {
+            return Err(StoreError::MissingShardLayout {
                 path: metadata.path().to_path_buf(),
             })
         }
@@ -438,12 +438,12 @@ pub(crate) fn resolve_shard_layout(
     let initial_capacity = match config.initial_capacity {
         Some(value) => value,
         None if allow_persist => {
-            return Err(MhinStoreError::MissingShardConfig {
+            return Err(StoreError::MissingShardConfig {
                 field: "initial_capacity",
             })
         }
         None => {
-            return Err(MhinStoreError::MissingShardLayout {
+            return Err(StoreError::MissingShardLayout {
                 path: metadata.path().to_path_buf(),
             })
         }
@@ -491,7 +491,7 @@ mod tests {
         let err = resolve_shard_layout(&metadata, &config, false).unwrap_err();
 
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,
@@ -520,7 +520,7 @@ mod tests {
         let err = resolve_shard_layout(&metadata, &config, true).unwrap_err();
 
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,
@@ -558,7 +558,7 @@ mod tests {
         let err = resolve_shard_layout(&metadata, &config, false).unwrap_err();
 
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,
@@ -591,7 +591,7 @@ mod tests {
         let err = resolve_shard_layout(&metadata, &config, false).unwrap_err();
 
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,

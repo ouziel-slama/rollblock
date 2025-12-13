@@ -7,7 +7,7 @@ use heed::types::Bytes;
 use heed::{EnvFlags, EnvOpenOptions};
 use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::Value;
-use rollblock::{DurabilityMode, MhinStoreFacade, StoreConfig, StoreFacade};
+use rollblock::{DurabilityMode, SimpleStoreFacade, StoreConfig, StoreFacade};
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -320,7 +320,7 @@ fn run_scenario(scenario: &Scenario, total_blocks: u64) -> Result<Duration, Box<
     .without_remote_server();
     config = config.with_durability_mode(scenario.durability_mode.clone());
 
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     let mut next_key: u64 = 0;
     let mut delete_cursor: u64 = 0;

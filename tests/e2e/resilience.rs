@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use rollblock::types::{Operation, StoreKey as Key};
 use rollblock::{
-    BlockJournal, DurabilityMode, FileBlockJournal, MhinStoreBlockFacade, MhinStoreError,
-    StoreFacade, StoreResult,
+    BlockJournal, BlockStoreFacade, DurabilityMode, FileBlockJournal, StoreError, StoreFacade,
+    StoreResult,
 };
 
 use super::e2e_support::{
@@ -60,7 +60,7 @@ fn e2e_checksum_corruption() -> StoreResult<()> {
     drop(file);
 
     match harness.reopen() {
-        Err(MhinStoreError::JournalChecksumMismatch { block }) => assert_eq!(block, 1),
+        Err(StoreError::JournalChecksumMismatch { block }) => assert_eq!(block, 1),
         Err(other) => panic!("unexpected error when reopening: {other:?}"),
         Ok(store) => {
             store.close()?;
@@ -127,7 +127,7 @@ fn e2e_block_facade_end_block_failure_is_fatal() -> StoreResult<()> {
 
     let harness = StoreHarness::builder("block-facade-fatal").build();
     let store = harness.open()?;
-    let block_facade = MhinStoreBlockFacade::from_facade(store.clone());
+    let block_facade = BlockStoreFacade::from_facade(store.clone());
     let key: Key = [0xEFu8; Key::BYTES].into();
 
     block_facade.start_block(1)?;
@@ -144,7 +144,7 @@ fn e2e_block_facade_end_block_failure_is_fatal() -> StoreResult<()> {
     })?;
     let err = block_facade.end_block().unwrap_err();
     match err {
-        MhinStoreError::DurabilityFailure { block, reason } => {
+        StoreError::DurabilityFailure { block, reason } => {
             assert_eq!(block, 1);
             assert!(
                 reason.contains("block facade failed"),
@@ -156,12 +156,12 @@ fn e2e_block_facade_end_block_failure_is_fatal() -> StoreResult<()> {
 
     let start_err = block_facade.start_block(2).unwrap_err();
     match start_err {
-        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
+        StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 1),
         other => panic!("unexpected start_block error after fatal failure: {other:?}"),
     }
 
     match store.ensure_healthy() {
-        Err(MhinStoreError::DurabilityFailure { block, .. }) => assert_eq!(block, 1),
+        Err(StoreError::DurabilityFailure { block, .. }) => assert_eq!(block, 1),
         other => panic!("store should report fatal error after failed end_block: {other:?}"),
     }
 

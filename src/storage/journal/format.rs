@@ -5,7 +5,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use blake3::Hash;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::types::{
     BlockId, BlockUndo, JournalMeta, Operation, StoreKey, Value, MAX_VALUE_BYTES, MIN_KEY_BYTES,
 };
@@ -83,14 +83,14 @@ impl JournalHeader {
     pub(crate) fn from_bytes(bytes: &[u8; JOURNAL_HEADER_SIZE]) -> StoreResult<Self> {
         let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         if magic != JOURNAL_MAGIC {
-            return Err(MhinStoreError::InvalidJournalHeader {
+            return Err(StoreError::InvalidJournalHeader {
                 reason: "invalid magic",
             });
         }
 
         let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
         if version != JOURNAL_VERSION {
-            return Err(MhinStoreError::InvalidJournalHeader {
+            return Err(StoreError::InvalidJournalHeader {
                 reason: "unsupported version",
             });
         }
@@ -104,7 +104,7 @@ impl JournalHeader {
         let checksum = u32::from_le_bytes(bytes[38..42].try_into().unwrap());
 
         if key_bytes < MIN_KEY_BYTES as u16 {
-            return Err(MhinStoreError::InvalidJournalHeader {
+            return Err(StoreError::InvalidJournalHeader {
                 reason: "key width below minimum",
             });
         }
@@ -135,20 +135,20 @@ pub(crate) fn read_journal_block(
     let header = JournalHeader::from_bytes(&header_bytes)?;
 
     if header.block_height != meta.block_height {
-        return Err(MhinStoreError::JournalBlockIdMismatch {
+        return Err(StoreError::JournalBlockIdMismatch {
             expected: meta.block_height,
             found: header.block_height,
         });
     }
 
     if header.compressed_len != meta.compressed_len {
-        return Err(MhinStoreError::InvalidJournalHeader {
+        return Err(StoreError::InvalidJournalHeader {
             reason: "compressed length mismatch",
         });
     }
 
     if header.key_bytes as usize != expected_key_bytes {
-        return Err(MhinStoreError::ConfigurationMismatch {
+        return Err(StoreError::ConfigurationMismatch {
             field: "key_bytes",
             stored: header.key_bytes as usize,
             requested: expected_key_bytes,
@@ -156,7 +156,7 @@ pub(crate) fn read_journal_block(
     }
 
     if header.checksum != meta.checksum {
-        return Err(MhinStoreError::JournalChecksumMismatch {
+        return Err(StoreError::JournalChecksumMismatch {
             block: meta.block_height,
         });
     }
@@ -166,7 +166,7 @@ pub(crate) fn read_journal_block(
 
     let payload_checksum = checksum_to_u32(blake3::hash(&payload));
     if payload_checksum != meta.checksum {
-        return Err(MhinStoreError::JournalChecksumMismatch {
+        return Err(StoreError::JournalChecksumMismatch {
             block: meta.block_height,
         });
     }
@@ -181,7 +181,7 @@ pub(crate) fn read_journal_block(
     // entry was corrupted (e.g. a flipped header byte). Treat it as a checksum
     // failure so startup surfaces the corruption instead of silently truncating.
     if decompressed.len() as u64 != header.uncompressed_len {
-        return Err(MhinStoreError::JournalChecksumMismatch {
+        return Err(StoreError::JournalChecksumMismatch {
             block: header.block_height,
         });
     }
@@ -189,7 +189,7 @@ pub(crate) fn read_journal_block(
     let payload: JournalBlockPayload = bincode::deserialize(&decompressed)?;
 
     if payload.block_height != meta.block_height {
-        return Err(MhinStoreError::JournalBlockIdMismatch {
+        return Err(StoreError::JournalBlockIdMismatch {
             expected: meta.block_height,
             found: payload.block_height,
         });
@@ -199,7 +199,7 @@ pub(crate) fn read_journal_block(
         header
             .entry_count
             .try_into()
-            .map_err(|_| MhinStoreError::InvalidJournalHeader {
+            .map_err(|_| StoreError::InvalidJournalHeader {
                 reason: "entry count overflow",
             })?;
 
@@ -223,13 +223,14 @@ fn decode_operations(bytes: &[u8], expected_count: usize) -> StoreResult<Vec<Ope
     }
 
     if expected_count > 0 {
-        let min_len = expected_count.checked_mul(ENTRY_OVERHEAD).ok_or(
-            MhinStoreError::InvalidJournalHeader {
-                reason: "operation payload overflow",
-            },
-        )?;
+        let min_len =
+            expected_count
+                .checked_mul(ENTRY_OVERHEAD)
+                .ok_or(StoreError::InvalidJournalHeader {
+                    reason: "operation payload overflow",
+                })?;
         if bytes.len() < min_len {
-            return Err(MhinStoreError::InvalidJournalHeader {
+            return Err(StoreError::InvalidJournalHeader {
                 reason: "operation payload truncated",
             });
         }
@@ -240,7 +241,7 @@ fn decode_operations(bytes: &[u8], expected_count: usize) -> StoreResult<Vec<Ope
 
     while cursor < bytes.len() {
         if cursor + ENTRY_OVERHEAD > bytes.len() {
-            return Err(MhinStoreError::InvalidJournalHeader {
+            return Err(StoreError::InvalidJournalHeader {
                 reason: "operation payload truncated",
             });
         }
@@ -253,13 +254,13 @@ fn decode_operations(bytes: &[u8], expected_count: usize) -> StoreResult<Vec<Ope
         cursor += 2;
 
         if value_len > MAX_VALUE_BYTES {
-            return Err(MhinStoreError::InvalidJournalHeader {
+            return Err(StoreError::InvalidJournalHeader {
                 reason: "operation value exceeds limit",
             });
         }
 
         if cursor + value_len > bytes.len() {
-            return Err(MhinStoreError::InvalidJournalHeader {
+            return Err(StoreError::InvalidJournalHeader {
                 reason: "operation payload truncated",
             });
         }
@@ -274,13 +275,13 @@ fn decode_operations(bytes: &[u8], expected_count: usize) -> StoreResult<Vec<Ope
     }
 
     if cursor != bytes.len() {
-        return Err(MhinStoreError::InvalidJournalHeader {
+        return Err(StoreError::InvalidJournalHeader {
             reason: "operation payload trailing bytes",
         });
     }
 
     if operations.len() != expected_count {
-        return Err(MhinStoreError::InvalidJournalHeader {
+        return Err(StoreError::InvalidJournalHeader {
             reason: "entry count mismatch",
         });
     }
@@ -305,7 +306,7 @@ pub(crate) fn serialize_journal_block(
         operations
             .len()
             .try_into()
-            .map_err(|_| MhinStoreError::InvalidJournalHeader {
+            .map_err(|_| StoreError::InvalidJournalHeader {
                 reason: "operation count overflow",
             })?;
 
@@ -318,14 +319,14 @@ fn encode_operations(operations: &[Operation]) -> StoreResult<Vec<u8>> {
     for op in operations {
         let value_len = op.value.len();
         if value_len > MAX_VALUE_BYTES {
-            return Err(MhinStoreError::InvalidJournalHeader {
+            return Err(StoreError::InvalidJournalHeader {
                 reason: "operation value exceeds limit",
             });
         }
 
         total_len = total_len
             .checked_add(StoreKey::BYTES + 2 + value_len)
-            .ok_or(MhinStoreError::InvalidJournalHeader {
+            .ok_or(StoreError::InvalidJournalHeader {
                 reason: "operation payload overflow",
             })?;
     }
@@ -403,7 +404,7 @@ mod tests {
             read_journal_block(&mut file, &meta, StoreKey::BYTES).expect_err("should mismatch");
 
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,

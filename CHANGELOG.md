@@ -7,6 +7,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.1] - 2025-12-13
+
+### Changed
+- Renamed the public API to drop the `Mhin` prefix: `MhinStoreFacade` → `SimpleStoreFacade`, `MhinStoreBlockFacade` → `BlockStoreFacade`, and `MhinStoreError` → `StoreError`. Docs, examples, and tests now reflect the new names.
+
 ## [0.4.0] - 2025-12-09
 
 ### Breaking Changes
@@ -37,7 +42,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [0.3.0] - 2025-11-28
 
 ### Added
-- `StoreFacade::pop(block_height, key)` removes a key while returning its previous value under the same orchestration lock. `MhinStoreFacade`, `MhinStoreBlockFacade`, all orchestrators, docs, and tests have been updated accordingly, and `DefaultBlockOrchestrator` now reuses undo metadata to avoid redundant lookups.
+- `StoreFacade::pop(block_height, key)` removes a key while returning its previous value under the same orchestration lock. `SimpleStoreFacade`, `BlockStoreFacade`, all orchestrators, docs, and tests have been updated accordingly, and `DefaultBlockOrchestrator` now reuses undo metadata to avoid redundant lookups.
 
 ## [0.2.1] - 2025-11-28
 

@@ -8,12 +8,12 @@ mod recovery;
 #[cfg(test)]
 mod tests;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::types::{BlockId, Operation, StoreKey as Key, Value};
 
-pub use block::MhinStoreBlockFacade;
+pub use block::BlockStoreFacade;
 pub use config::{RemoteServerSettings, StoreConfig};
-pub use core::MhinStoreFacade;
+pub use core::SimpleStoreFacade;
 
 /// Main interface for interacting with the state store.
 ///
@@ -143,13 +143,13 @@ pub trait StoreFacade: Send + Sync {
 }
 
 fn relaxed_mode_not_supported() -> StoreResult<()> {
-    Err(MhinStoreError::UnsupportedOperation {
+    Err(StoreError::UnsupportedOperation {
         reason: "relaxed durability mode is not supported by this StoreFacade".to_string(),
     })
 }
 
 fn pop_not_supported() -> StoreResult<Value> {
-    Err(MhinStoreError::UnsupportedOperation {
+    Err(StoreError::UnsupportedOperation {
         reason: "pop is not supported by this StoreFacade".to_string(),
     })
 }

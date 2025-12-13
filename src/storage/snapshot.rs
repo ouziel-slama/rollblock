@@ -82,7 +82,7 @@ impl Snapshotter for MmapSnapshotter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::MhinStoreError;
+    use crate::error::StoreError;
     use crate::state_shard::RawTableShard;
     use crate::types::{StoreKey as Key, Value, ValueBuf, MAX_VALUE_BYTES};
     use format::{checksum_to_u64, SNAPSHOT_HEADER_SIZE, SNAPSHOT_VERSION};
@@ -207,7 +207,7 @@ mod tests {
             .unwrap_err();
 
         match err {
-            MhinStoreError::SnapshotCorrupted { reason, .. } => {
+            StoreError::SnapshotCorrupted { reason, .. } => {
                 assert!(reason.contains("checksum mismatch"));
             }
             other => panic!("unexpected error: {other:?}"),
@@ -244,7 +244,7 @@ mod tests {
             .expect_err("should reject mismatched key width");
 
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,
@@ -396,7 +396,7 @@ mod tests {
         assert!(result.is_err());
 
         match result {
-            Err(crate::error::MhinStoreError::SnapshotCorrupted { reason, .. }) => {
+            Err(crate::error::StoreError::SnapshotCorrupted { reason, .. }) => {
                 assert!(reason.contains("shard count mismatch"));
             }
             _ => panic!("Expected SnapshotCorrupted error"),

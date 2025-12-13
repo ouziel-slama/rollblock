@@ -6,10 +6,10 @@ use thiserror::Error;
 use crate::net::ServerError;
 use crate::types::BlockId;
 
-pub type StoreResult<T> = Result<T, MhinStoreError>;
+pub type StoreResult<T> = Result<T, StoreError>;
 
 #[derive(Debug, Error)]
-pub enum MhinStoreError {
+pub enum StoreError {
     #[error("heed error: {0}")]
     Heed(#[from] heed::Error),
 

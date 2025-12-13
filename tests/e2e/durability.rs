@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use rollblock::types::{Operation, StoreKey as Key};
-use rollblock::{DurabilityMode, MhinStoreFacade, StoreConfig, StoreFacade, StoreResult};
+use rollblock::{DurabilityMode, SimpleStoreFacade, StoreConfig, StoreFacade, StoreResult};
 
 use super::e2e_support::{
     apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT,
@@ -356,7 +356,7 @@ fn e2e_sync_empty_block_crash_helper() -> StoreResult<()> {
         .with_lmdb_map_size(HARNESS_LMDB_MAP_SIZE)
         .without_remote_server();
     config.durability_mode = DurabilityMode::Synchronous;
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     let key: Key = [0xF1u8; Key::BYTES].into();
 
@@ -439,7 +439,7 @@ fn e2e_async_relaxed_crash_helper() -> StoreResult<()> {
         max_pending_blocks: 8,
     };
 
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
     let key: Key = [0xE2u8; Key::BYTES].into();
 
     apply_block(
@@ -714,7 +714,7 @@ fn e2e_snapshot_refresh() -> StoreResult<()> {
     Ok(())
 }
 
-fn wait_for_blocks_committed(store: &MhinStoreFacade, expected: u64) -> StoreResult<()> {
+fn wait_for_blocks_committed(store: &SimpleStoreFacade, expected: u64) -> StoreResult<()> {
     let deadline = Instant::now() + DEFAULT_TIMEOUT;
 
     loop {

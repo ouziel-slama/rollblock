@@ -28,7 +28,7 @@
 //! )?;
 //!
 //! // Initialize store
-//! let store = MhinStoreFacade::new(config)?;
+//! let store = SimpleStoreFacade::new(config)?;
 //!
 //! // Apply operations
 //! let ops = vec![
@@ -54,7 +54,7 @@
 //! // Rollback
 //! store.rollback(0)?;
 //! store.close()?;
-//! # Ok::<(), rollblock::error::MhinStoreError>(())
+//! # Ok::<(), rollblock::error::StoreError>(())
 //! ```
 //! Networking is opt-in: call `.enable_remote_server()` (or
 //! `.with_remote_server(...)`) to start the embedded server. It binds to
@@ -76,9 +76,9 @@ pub use crate::storage::journal as block_journal;
 pub use crate::storage::metadata;
 pub use crate::storage::snapshot;
 
-pub use api::error::{MhinStoreError, StoreResult};
+pub use api::error::{StoreError, StoreResult};
 pub use api::facade::{
-    MhinStoreBlockFacade, MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade,
+    BlockStoreFacade, RemoteServerSettings, SimpleStoreFacade, StoreConfig, StoreFacade,
 };
 pub use api::types::*;
 pub use client::{ClientError, RemoteStoreClient};

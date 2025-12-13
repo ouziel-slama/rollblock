@@ -7,7 +7,7 @@ use rollblock::block_journal::FileBlockJournal;
 use rollblock::storage::metadata::{GcWatermark, LmdbMetadataStore};
 use rollblock::types::{Operation, StoreKey as Key, Value};
 use rollblock::{
-    BlockJournal, DurabilityMode, MetadataStore, MhinStoreError, MhinStoreFacade, StoreConfig,
+    BlockJournal, DurabilityMode, MetadataStore, SimpleStoreFacade, StoreConfig, StoreError,
     StoreFacade,
 };
 use tempfile::tempdir_in;
@@ -34,21 +34,21 @@ fn second_writer_fails_fast() {
     let config = StoreConfig::new(&data_dir, 2, 16, 1, false)
         .expect("valid config")
         .without_remote_server();
-    let writer = MhinStoreFacade::new(config.clone()).expect("first writer");
+    let writer = SimpleStoreFacade::new(config.clone()).expect("first writer");
 
-    let err = match MhinStoreFacade::new(config.clone()) {
+    let err = match SimpleStoreFacade::new(config.clone()) {
         Ok(_) => panic!("second writer should fail"),
         Err(err) => err,
     };
     match err {
-        MhinStoreError::DataDirLocked { requested, .. } => {
+        StoreError::DataDirLocked { requested, .. } => {
             assert_eq!(requested, "exclusive");
         }
         other => panic!("unexpected error: {other:?}"),
     }
 
     drop(writer);
-    MhinStoreFacade::new(config).expect("writer should reopen after drop");
+    SimpleStoreFacade::new(config).expect("writer should reopen after drop");
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn active_handle_blocks_second_open_even_for_reads() {
         .without_remote_server();
     let key: Key = [0xAAu8; Key::BYTES].into();
 
-    let writer = MhinStoreFacade::new(config.clone()).expect("initial writer");
+    let writer = SimpleStoreFacade::new(config.clone()).expect("initial writer");
     writer
         .set(
             1,
@@ -71,19 +71,19 @@ fn active_handle_blocks_second_open_even_for_reads() {
         .expect("write should succeed");
     assert_eq!(writer.get(key).unwrap(), 11);
 
-    let err = match MhinStoreFacade::new(config.clone()) {
+    let err = match SimpleStoreFacade::new(config.clone()) {
         Ok(_) => panic!("second handle should fail"),
         Err(err) => err,
     };
     match err {
-        MhinStoreError::DataDirLocked { requested, .. } => {
+        StoreError::DataDirLocked { requested, .. } => {
             assert_eq!(requested, "exclusive");
         }
         other => panic!("unexpected error: {other:?}"),
     }
 
     drop(writer);
-    let reopened = MhinStoreFacade::new(config).expect("reopen after drop");
+    let reopened = SimpleStoreFacade::new(config).expect("reopen after drop");
     assert_eq!(reopened.get(key).unwrap(), 11);
     reopened.close().expect("reopened close");
 }
@@ -98,7 +98,7 @@ fn existing_config_recovers_lmdb_map_size() {
             .expect("valid config")
             .with_lmdb_map_size(custom_map_size)
             .without_remote_server();
-        let store = MhinStoreFacade::new(config).expect("initial writer");
+        let store = SimpleStoreFacade::new(config).expect("initial writer");
         store.close().expect("initial store close");
     }
 
@@ -109,7 +109,7 @@ fn existing_config_recovers_lmdb_map_size() {
         "StoreConfig::existing should recover the configured LMDB map size"
     );
 
-    let reopened = MhinStoreFacade::new(existing_config).expect("reopen with recovered map size");
+    let reopened = SimpleStoreFacade::new(existing_config).expect("reopen with recovered map size");
     reopened.close().expect("reopened store close");
 }
 
@@ -117,7 +117,7 @@ fn existing_config_recovers_lmdb_map_size() {
 fn background_pruner_removes_old_chunks_and_caps_rollback() {
     let data_dir = temp_store_dir("pruner-removal");
     let config = pruning_config(&data_dir);
-    let store = MhinStoreFacade::new(config.clone()).expect("store opens");
+    let store = SimpleStoreFacade::new(config.clone()).expect("store opens");
     eprintln!("store opened for pruner-removal");
 
     write_blocks(&store, 1, 20).expect("blocks persisted");
@@ -159,7 +159,7 @@ fn background_pruner_removes_old_chunks_and_caps_rollback() {
 fn pruning_survives_restart_and_limits_history() {
     let data_dir = temp_store_dir("pruner-restart");
     let config = pruning_config(&data_dir);
-    let store = MhinStoreFacade::new(config.clone()).expect("store opens");
+    let store = SimpleStoreFacade::new(config.clone()).expect("store opens");
     let final_block = 20;
 
     write_blocks(&store, 1, final_block).expect("blocks persisted");
@@ -181,7 +181,7 @@ fn pruning_survives_restart_and_limits_history() {
 
     let reopen_config =
         StoreConfig::existing_with_lmdb_map_size(&data_dir, 32 << 20).without_remote_server();
-    let reopened = MhinStoreFacade::new(reopen_config).expect("store reopens");
+    let reopened = SimpleStoreFacade::new(reopen_config).expect("store reopens");
     assert_eq!(
         reopened.current_block().expect("current block loads"),
         final_block
@@ -204,7 +204,7 @@ fn pending_prune_plan_replays_on_restart() {
     let config = pruning_config(&data_dir)
         .with_prune_interval(Duration::from_secs(60))
         .expect("custom interval");
-    let store = MhinStoreFacade::new(config.clone()).expect("store opens");
+    let store = SimpleStoreFacade::new(config.clone()).expect("store opens");
     write_blocks(&store, 1, 24).expect("blocks persisted");
     store.close().expect("initial close");
 
@@ -246,7 +246,7 @@ fn pending_prune_plan_replays_on_restart() {
 
     let reopen_config =
         StoreConfig::existing_with_lmdb_map_size(&data_dir, 32 << 20).without_remote_server();
-    let reopened = MhinStoreFacade::new(reopen_config).expect("store reopens");
+    let reopened = SimpleStoreFacade::new(reopen_config).expect("store reopens");
     reopened.close().expect("reopened close");
 
     let metadata_check =

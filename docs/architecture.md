@@ -91,7 +91,7 @@ pub trait StoreFacade {
 
 `pop` removes a single key under the same mutation lock that `set` uses and returns the previously committed value (or `Value::empty()` if the key was absent). This avoids coordinating an extra `get` + `set` round trip just to discover what was deleted.
 
-**Implementation**: `MhinStoreFacade` wraps everything and manages the embedded remote server.
+**Implementation**: `SimpleStoreFacade` wraps everything and manages the embedded remote server.
 
 ### Layer 2: Runtime (`src/runtime/`)
 
@@ -367,7 +367,7 @@ Every major component is a trait. Swap implementations without touching the rest
 
 | Trait | Default Implementation | Role |
 |-------|------------------------|------|
-| `StoreFacade` | `MhinStoreFacade` | Public API |
+| `StoreFacade` | `SimpleStoreFacade` | Public API |
 | `BlockOrchestrator` | `DefaultBlockOrchestrator` | Coordination |
 | `StateEngine` | `ShardedStateEngine` | Shard management |
 | `StateShard` | `RawTableShard` | In-memory storage |
@@ -414,7 +414,7 @@ use rollblock::types::StoreKey as Key;
 
 // Create store
 let config = StoreConfig::new("./data", 4, 10_000, 1, false)?;
-let store = MhinStoreFacade::new(config)?;
+let store = SimpleStoreFacade::new(config)?;
 
 // Write a block
 store.set(

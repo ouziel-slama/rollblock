@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use memmap2::Mmap;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::state_shard::StateShard;
 use crate::types::{BlockId, StoreKey as Key, ValueBuf, MAX_VALUE_BYTES};
 
@@ -18,7 +18,7 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
     let header = parse_header(path, &mmap)?;
 
     if header.key_bytes != Key::BYTES {
-        return Err(MhinStoreError::ConfigurationMismatch {
+        return Err(StoreError::ConfigurationMismatch {
             field: "key_bytes",
             stored: header.key_bytes,
             requested: Key::BYTES,
@@ -26,7 +26,7 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
     }
 
     if header.shard_count != shards.len() {
-        return Err(MhinStoreError::SnapshotCorrupted {
+        return Err(StoreError::SnapshotCorrupted {
             path: path.to_path_buf(),
             reason: format!(
                 "shard count mismatch: snapshot has {}, but {} shards provided",
@@ -39,7 +39,7 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
     if let Some(expected_checksum) = header.checksum {
         let computed = checksum_to_u64(blake3::hash(&mmap[header.header_size..]));
         if computed != expected_checksum {
-            return Err(MhinStoreError::SnapshotCorrupted {
+            return Err(StoreError::SnapshotCorrupted {
                 path: path.to_path_buf(),
                 reason: format!(
                     "checksum mismatch: expected {:016x}, got {:016x}",
@@ -53,13 +53,13 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
     let mut offset_pos = header.header_size;
     let offsets_end = offset_pos
         .checked_add(header.shard_count.saturating_mul(8))
-        .ok_or_else(|| MhinStoreError::SnapshotCorrupted {
+        .ok_or_else(|| StoreError::SnapshotCorrupted {
             path: path.to_path_buf(),
             reason: "offset section size overflow".to_string(),
         })?;
 
     if offsets_end > mmap.len() {
-        return Err(MhinStoreError::SnapshotCorrupted {
+        return Err(StoreError::SnapshotCorrupted {
             path: path.to_path_buf(),
             reason: "unexpected end of file while reading offsets".to_string(),
         });
@@ -78,7 +78,7 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
         ]) as usize;
 
         if offset < offsets_end {
-            return Err(MhinStoreError::SnapshotCorrupted {
+            return Err(StoreError::SnapshotCorrupted {
                 path: path.to_path_buf(),
                 reason: format!("offset for shard points inside header: {}", offset),
             });
@@ -92,7 +92,7 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
         let data_offset = offsets[shard_idx];
 
         if data_offset + 8 > mmap.len() {
-            return Err(MhinStoreError::SnapshotCorrupted {
+            return Err(StoreError::SnapshotCorrupted {
                 path: path.to_path_buf(),
                 reason: format!("invalid offset for shard {}", shard_idx),
             });
@@ -119,7 +119,7 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
 
         for _ in 0..entry_count {
             if entry_pos + Key::BYTES + VALUE_LEN_WIDTH > mmap.len() {
-                return Err(MhinStoreError::SnapshotCorrupted {
+                return Err(StoreError::SnapshotCorrupted {
                     path: path.to_path_buf(),
                     reason: format!(
                         "unexpected end of file while reading shard {} key length",
@@ -136,7 +136,7 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
             let value_len = u16::from_le_bytes([mmap[len_offset], mmap[len_offset + 1]]) as usize;
 
             if value_len > MAX_VALUE_BYTES {
-                return Err(MhinStoreError::SnapshotCorrupted {
+                return Err(StoreError::SnapshotCorrupted {
                     path: path.to_path_buf(),
                     reason: format!(
                         "value length {} exceeds MAX_VALUE_BYTES while reading shard {}",
@@ -148,7 +148,7 @@ pub(super) fn load_snapshot(path: &Path, shards: &[Arc<dyn StateShard>]) -> Stor
             entry_pos = len_offset + 2;
 
             if entry_pos + value_len > mmap.len() {
-                return Err(MhinStoreError::SnapshotCorrupted {
+                return Err(StoreError::SnapshotCorrupted {
                     path: path.to_path_buf(),
                     reason: format!(
                         "unexpected end of file while reading shard {} value payload",

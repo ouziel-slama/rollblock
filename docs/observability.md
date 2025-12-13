@@ -16,10 +16,10 @@ Rollblock provides comprehensive observability through:
 Get metrics from the store facade:
 
 ```rust
-use rollblock::{MhinStoreFacade, StoreConfig};
+use rollblock::{SimpleStoreFacade, StoreConfig};
 
 let config = StoreConfig::new("./data", 4, 1000, 1, false)?.enable_remote_server()?;
-let store = MhinStoreFacade::new(config)?;
+let store = SimpleStoreFacade::new(config)?;
 
 // Access metrics
 if let Some(metrics) = store.metrics() {
@@ -297,7 +297,7 @@ Implement a health check endpoint:
 ```rust
 use rollblock::metrics::HealthState;
 
-fn health_check(store: &MhinStoreFacade) -> (u16, &'static str) {
+fn health_check(store: &SimpleStoreFacade) -> (u16, &'static str) {
     match store.health() {
         Some(health) => match health.state {
             HealthState::Healthy => (200, "OK"),
@@ -339,7 +339,7 @@ For production, use INFO or DEBUG level only.
 ## Example: Complete Observability Setup
 
 ```rust
-use rollblock::{MhinStoreFacade, StoreConfig};
+use rollblock::{SimpleStoreFacade, StoreConfig};
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -350,7 +350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create store
     let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     // Start metrics exporter thread
     let store_clone = store.clone();
@@ -390,7 +390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### No Metrics Available
 
 If `store.metrics()` returns `None`, check:
-- You're using `MhinStoreFacade` (custom orchestrators may not have metrics)
+- You're using `SimpleStoreFacade` (custom orchestrators may not have metrics)
 - The store was initialized correctly
 
 ### Unexpected Health State

@@ -15,7 +15,7 @@ use rcgen::generate_simple_self_signed;
 use rollblock::client::{ClientConfig, RemoteStoreClient};
 use rollblock::net::BasicAuthConfig;
 use rollblock::types::{Operation, StoreKey as Key};
-use rollblock::{MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade};
+use rollblock::{RemoteServerSettings, SimpleStoreFacade, StoreConfig, StoreFacade};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🌐 Network Client Example\n");
@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_tls(cert_path.clone(), key_path);
 
     let config = StoreConfig::new(&data_dir, 2, 32, 1, false)?.with_remote_server(settings);
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
     println!("   ✓ Store created with server on port {}\n", port);
 
     // Write some data to the store

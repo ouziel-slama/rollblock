@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::types::{BlockId, Operation, StoreKey as Key, Value};
 
-use super::core::MhinStoreFacade;
+use super::core::SimpleStoreFacade;
 use super::StoreFacade;
 
 struct PendingBlock {
@@ -43,19 +43,19 @@ impl PendingBlock {
 /// [`start_block`](Self::start_block), [`set`](Self::set) and
 /// [`end_block`](Self::end_block) while exposing intermediate reads that
 /// reflect uncommitted changes.
-pub struct MhinStoreBlockFacade {
-    inner: MhinStoreFacade,
+pub struct BlockStoreFacade {
+    inner: SimpleStoreFacade,
     pending: Mutex<Option<PendingBlock>>,
 }
 
-impl MhinStoreBlockFacade {
+impl BlockStoreFacade {
     /// Creates a new block facade from a configuration.
     pub fn new(config: super::config::StoreConfig) -> StoreResult<Self> {
-        MhinStoreFacade::new(config).map(Self::from_facade)
+        SimpleStoreFacade::new(config).map(Self::from_facade)
     }
 
-    /// Creates a block facade from an existing [`MhinStoreFacade`].
-    pub fn from_facade(inner: MhinStoreFacade) -> Self {
+    /// Creates a block facade from an existing [`SimpleStoreFacade`].
+    pub fn from_facade(inner: SimpleStoreFacade) -> Self {
         Self {
             inner,
             pending: Mutex::new(None),
@@ -70,7 +70,7 @@ impl MhinStoreBlockFacade {
                 *guard = None;
                 drop(guard);
                 self.pending.clear_poison();
-                Err(MhinStoreError::LockPoisoned { lock: "pending" })
+                Err(StoreError::LockPoisoned { lock: "pending" })
             }
         }
     }
@@ -81,7 +81,7 @@ impl MhinStoreBlockFacade {
 
         let mut pending = self.lock_pending()?;
         if let Some(current) = pending.as_ref() {
-            return Err(MhinStoreError::BlockInProgress {
+            return Err(StoreError::BlockInProgress {
                 current: current.block_height,
             });
         }
@@ -95,7 +95,7 @@ impl MhinStoreBlockFacade {
         self.inner.durable_block()?;
 
         let mut pending = self.lock_pending()?;
-        let staged = pending.as_mut().ok_or(MhinStoreError::NoBlockInProgress)?;
+        let staged = pending.as_mut().ok_or(StoreError::NoBlockInProgress)?;
         staged.record_operation(operation);
         Ok(())
     }
@@ -107,7 +107,7 @@ impl MhinStoreBlockFacade {
         let mut pending = self.lock_pending()?;
         let block_height = pending
             .as_ref()
-            .ok_or(MhinStoreError::NoBlockInProgress)?
+            .ok_or(StoreError::NoBlockInProgress)?
             .block_height;
 
         if let Some(value) = pending
@@ -125,9 +125,9 @@ impl MhinStoreBlockFacade {
         }
 
         let previous = self.inner.get(key)?;
-        let staged = pending.as_mut().ok_or(MhinStoreError::NoBlockInProgress)?;
+        let staged = pending.as_mut().ok_or(StoreError::NoBlockInProgress)?;
         if staged.block_height != block_height {
-            return Err(MhinStoreError::BlockInProgress {
+            return Err(StoreError::BlockInProgress {
                 current: staged.block_height,
             });
         }
@@ -142,7 +142,7 @@ impl MhinStoreBlockFacade {
     pub fn end_block(&self) -> StoreResult<()> {
         let mut guard = self.lock_pending()?;
         let (block_height, operations) = {
-            let pending_block = guard.as_ref().ok_or(MhinStoreError::NoBlockInProgress)?;
+            let pending_block = guard.as_ref().ok_or(StoreError::NoBlockInProgress)?;
             (pending_block.block_height, pending_block.operations.clone())
         };
 
@@ -167,7 +167,7 @@ impl MhinStoreBlockFacade {
                     .orchestrator()
                     .record_fatal_error(block_height, reason.clone());
 
-                Err(MhinStoreError::DurabilityFailure {
+                Err(StoreError::DurabilityFailure {
                     block: block_height,
                     reason,
                 })
@@ -203,7 +203,7 @@ impl MhinStoreBlockFacade {
         };
 
         if let Some(pending) = pending_block {
-            return Err(MhinStoreError::BlockInProgress { current: pending });
+            return Err(StoreError::BlockInProgress { current: pending });
         }
 
         self.inner.rollback(target)
@@ -211,7 +211,7 @@ impl MhinStoreBlockFacade {
 
     /// Flushes pending state and closes the underlying store.
     ///
-    /// Returns [`MhinStoreError::BlockInProgress`] if a block is currently being staged.
+    /// Returns [`StoreError::BlockInProgress`] if a block is currently being staged.
     pub fn close(&self) -> StoreResult<()> {
         self.inner.durable_block()?;
 
@@ -221,14 +221,14 @@ impl MhinStoreBlockFacade {
         };
 
         if let Some(pending) = pending_block {
-            return Err(MhinStoreError::BlockInProgress { current: pending });
+            return Err(StoreError::BlockInProgress { current: pending });
         }
 
         self.inner.close()
     }
 
     /// Provides access to the underlying facade.
-    pub fn inner(&self) -> &MhinStoreFacade {
+    pub fn inner(&self) -> &SimpleStoreFacade {
         &self.inner
     }
 
@@ -261,7 +261,7 @@ impl MhinStoreBlockFacade {
     }
 }
 
-impl StoreFacade for MhinStoreBlockFacade {
+impl StoreFacade for BlockStoreFacade {
     fn set(&self, block_height: BlockId, operations: Vec<Operation>) -> StoreResult<()> {
         let pending_block = {
             let guard = self.lock_pending()?;
@@ -269,18 +269,18 @@ impl StoreFacade for MhinStoreBlockFacade {
         };
 
         if let Some(pending) = pending_block {
-            return Err(MhinStoreError::BlockInProgress { current: pending });
+            return Err(StoreError::BlockInProgress { current: pending });
         }
 
         self.inner.set(block_height, operations)
     }
 
     fn rollback(&self, target: BlockId) -> StoreResult<()> {
-        MhinStoreBlockFacade::rollback(self, target)
+        BlockStoreFacade::rollback(self, target)
     }
 
     fn get(&self, key: Key) -> StoreResult<Value> {
-        MhinStoreBlockFacade::get(self, key)
+        BlockStoreFacade::get(self, key)
     }
 
     fn multi_get(&self, keys: &[Key]) -> StoreResult<Vec<Value>> {
@@ -340,7 +340,7 @@ impl StoreFacade for MhinStoreBlockFacade {
     }
 
     fn close(&self) -> StoreResult<()> {
-        MhinStoreBlockFacade::close(self)
+        BlockStoreFacade::close(self)
     }
 
     fn current_block(&self) -> StoreResult<BlockId> {
@@ -366,7 +366,7 @@ impl StoreFacade for MhinStoreBlockFacade {
         };
 
         if let Some(pending) = pending_block {
-            return Err(MhinStoreError::BlockInProgress { current: pending });
+            return Err(StoreError::BlockInProgress { current: pending });
         }
 
         self.inner.pop(block_height, key)

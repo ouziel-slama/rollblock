@@ -4,7 +4,7 @@ use std::path::Path;
 
 use fs2::FileExt;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 
 const LOCK_FILE_NAME: &str = "rollblock.lock";
 
@@ -29,7 +29,7 @@ impl StoreLockGuard {
             Ok(file) => file,
             Err(err) => {
                 if err.kind() == ErrorKind::NotFound {
-                    return Err(MhinStoreError::MissingMetadata("lock file"));
+                    return Err(StoreError::MissingMetadata("lock file"));
                 }
                 return Err(err.into());
             }
@@ -39,7 +39,7 @@ impl StoreLockGuard {
         let lock_result = FileExt::try_lock_exclusive(&file);
 
         if lock_result.is_err() {
-            return Err(MhinStoreError::DataDirLocked {
+            return Err(StoreError::DataDirLocked {
                 path: lock_path,
                 requested,
             });

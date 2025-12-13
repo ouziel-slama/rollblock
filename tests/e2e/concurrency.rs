@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rollblock::types::{Operation, StoreKey as Key};
-use rollblock::{DurabilityMode, MhinStoreError, MhinStoreFacade, StoreFacade, StoreResult};
+use rollblock::{DurabilityMode, SimpleStoreFacade, StoreError, StoreFacade, StoreResult};
 
 use super::e2e_support::{
     apply_block, init_tracing, wait_for_durable, StoreHarness, DEFAULT_TIMEOUT,
@@ -60,7 +60,7 @@ fn e2e_multi_reader() -> StoreResult<()> {
         Ok(())
     });
 
-    let reader_loop = |reader_store: MhinStoreFacade| {
+    let reader_loop = |reader_store: SimpleStoreFacade| {
         let reader_barrier = Arc::clone(&barrier);
         let reader_done = Arc::clone(&done);
         thread::spawn(move || -> StoreResult<Vec<u64>> {
@@ -141,12 +141,12 @@ fn e2e_lock_contention() -> StoreResult<()> {
     let store = harness.open()?;
     let config_locked = harness.config();
 
-    let err = match MhinStoreFacade::new(config_locked.clone()) {
+    let err = match SimpleStoreFacade::new(config_locked.clone()) {
         Ok(_) => panic!("second writer should fail"),
         Err(err) => err,
     };
     match err {
-        MhinStoreError::DataDirLocked { requested, .. } => {
+        StoreError::DataDirLocked { requested, .. } => {
             assert_eq!(requested, "exclusive");
         }
         other => panic!("unexpected error: {other:?}"),
@@ -156,7 +156,7 @@ fn e2e_lock_contention() -> StoreResult<()> {
     store.close()?;
     drop(store);
 
-    let reopened = MhinStoreFacade::new(config_locked)?;
+    let reopened = SimpleStoreFacade::new(config_locked)?;
     reopened.ensure_healthy()?;
     reopened.close()?;
     Ok(())

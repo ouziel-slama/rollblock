@@ -11,7 +11,7 @@ use std::time::Duration;
 use rollblock::block_journal::{
     BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, SyncPolicy,
 };
-use rollblock::error::{MhinStoreError, StoreResult};
+use rollblock::error::{StoreError, StoreResult};
 use rollblock::metadata::{GcWatermark, MetadataStore};
 use rollblock::snapshot::Snapshotter;
 use rollblock::state_shard::StateShard;
@@ -84,7 +84,7 @@ impl MetadataStore for MemoryMetadataStore {
         let end = *range.end();
 
         if start > end {
-            return Err(MhinStoreError::InvalidBlockRange { start, end });
+            return Err(StoreError::InvalidBlockRange { start, end });
         }
 
         let offsets = self.offsets.lock().unwrap();
@@ -170,9 +170,7 @@ impl MetadataStore for FailingMetadataStore {
         let mut failed = self.failed.lock().unwrap();
         if block == self.fail_block && !*failed {
             *failed = true;
-            return Err(MhinStoreError::Io(Error::other(
-                "simulated metadata failure",
-            )));
+            return Err(StoreError::Io(Error::other("simulated metadata failure")));
         }
         drop(failed);
         <MemoryMetadataStore as MetadataStore>::prune_journal_offsets_at_or_before(
@@ -205,9 +203,7 @@ impl MetadataStore for FailingMetadataStore {
         let mut failed = self.failed.lock().unwrap();
         if block == self.fail_block && !*failed {
             *failed = true;
-            return Err(MhinStoreError::Io(Error::other(
-                "simulated metadata failure",
-            )));
+            return Err(StoreError::Io(Error::other("simulated metadata failure")));
         }
         drop(failed);
         <MemoryMetadataStore as MetadataStore>::record_block_commit(&self.inner, block, meta)
@@ -292,7 +288,7 @@ impl BlockJournal for FlakyJournal {
             let mut failed = self.failed.lock().unwrap();
             if !*failed {
                 *failed = true;
-                return Err(MhinStoreError::Io(Error::other(
+                return Err(StoreError::Io(Error::other(
                     "simulated persistence failure",
                 )));
             }

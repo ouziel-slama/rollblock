@@ -7,7 +7,7 @@ use rcgen::generate_simple_self_signed;
 use rollblock::client::{ClientConfig, ClientError, RemoteStoreClient};
 use rollblock::net::BasicAuthConfig;
 use rollblock::types::{Operation, StoreKey as Key};
-use rollblock::{MhinStoreError, MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade};
+use rollblock::{RemoteServerSettings, SimpleStoreFacade, StoreConfig, StoreError, StoreFacade};
 
 fn bytes_to_u64_le(bytes: &[u8]) -> u64 {
     let mut buf = [0u8; 8];
@@ -59,7 +59,7 @@ fn network_round_trip_tls_auto_server() {
     let config = StoreConfig::new(&data_dir, 2, 32, 1, false)
         .expect("valid config")
         .with_remote_server(settings);
-    let store = MhinStoreFacade::new(config).unwrap();
+    let store = SimpleStoreFacade::new(config).unwrap();
     store
         .set(
             1,
@@ -109,7 +109,7 @@ fn network_rejects_bad_credentials() {
     let config = StoreConfig::new(&data_dir, 2, 16, 1, false)
         .expect("valid config")
         .with_remote_server(settings);
-    let store = MhinStoreFacade::new(config).unwrap();
+    let store = SimpleStoreFacade::new(config).unwrap();
     store
         .set(
             1,
@@ -150,7 +150,7 @@ fn network_round_trip_without_tls() {
     let config = StoreConfig::new(&data_dir, 2, 32, 1, false)
         .expect("valid config")
         .with_remote_server(settings);
-    let store = MhinStoreFacade::new(config).unwrap();
+    let store = SimpleStoreFacade::new(config).unwrap();
     store
         .set(
             1,
@@ -221,13 +221,10 @@ fn default_remote_server_settings_require_custom_credentials() {
         .expect("valid config")
         .with_remote_server(settings);
 
-    let err = MhinStoreFacade::new(config)
+    let err = SimpleStoreFacade::new(config)
         .err()
         .expect("placeholder credentials rejected");
-    assert!(matches!(
-        err,
-        MhinStoreError::RemoteServerCredentialsMissing
-    ));
+    assert!(matches!(err, StoreError::RemoteServerCredentialsMissing));
 }
 
 #[test]
@@ -241,13 +238,10 @@ fn enable_remote_server_without_custom_credentials_fails() {
         .enable_remote_server()
         .expect("default remote server settings exist");
 
-    let err = MhinStoreFacade::new(config)
+    let err = SimpleStoreFacade::new(config)
         .err()
         .expect("server should refuse placeholder credentials");
-    assert!(matches!(
-        err,
-        MhinStoreError::RemoteServerCredentialsMissing
-    ));
+    assert!(matches!(err, StoreError::RemoteServerCredentialsMissing));
 }
 
 #[test]
@@ -267,7 +261,7 @@ fn network_server_disabled_by_default() {
     let data_dir = temp.path().join("store");
 
     let config = StoreConfig::new(&data_dir, 2, 32, 1, false).expect("valid config");
-    let store = MhinStoreFacade::new(config).unwrap();
+    let store = SimpleStoreFacade::new(config).unwrap();
 
     match std::net::TcpListener::bind(default_addr) {
         Ok(listener) => drop(listener),

@@ -6,7 +6,7 @@
 //! Run with: cargo run --example parallel_processing --release
 
 use rollblock::types::{Operation, StoreKey as Key, Value};
-use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+use rollblock::{SimpleStoreFacade, StoreConfig, StoreFacade};
 use std::time::Instant;
 
 fn key_from_u64(value: u64) -> Key {
@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   - Threads: 8 (parallel mode with Rayon)");
     println!("   - Initial capacity: 100,000 per shard\n");
 
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     // Benchmark 1: Large batch set operations
     println!("🔥 Benchmark 1: Setting 100,000 keys");

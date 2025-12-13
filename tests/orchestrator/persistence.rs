@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use rollblock::block_journal::{
     BlockJournal, JournalAppendOutcome, JournalBlock, JournalIter, SyncPolicy,
 };
-use rollblock::error::MhinStoreError;
+use rollblock::error::StoreError;
 use rollblock::orchestrator::{
     BlockOrchestrator, DefaultBlockOrchestrator, DurabilityMode, PersistenceSettings,
 };
@@ -135,7 +135,7 @@ fn async_persistence_failure_is_fatal() {
 
     let fatal = orchestrator.ensure_healthy().unwrap_err();
     match fatal {
-        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
+        StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
         other => panic!("unexpected error: {other:?}"),
     }
 
@@ -144,26 +144,26 @@ fn async_persistence_failure_is_fatal() {
         .apply_operations(3, vec![operation(key_c, 30)])
         .unwrap_err();
     match err {
-        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
+        StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
         other => panic!("unexpected error: {other:?}"),
     }
 
     let err = orchestrator.fetch(key_b).unwrap_err();
     match err {
-        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
+        StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
         other => panic!("unexpected error: {other:?}"),
     }
 
     let err = orchestrator.fetch(key_a).unwrap_err();
     match err {
-        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
+        StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
         other => panic!("unexpected error: {other:?}"),
     }
     assert_eq!(metadata.current_block().unwrap(), 1);
 
     let shutdown_err = orchestrator.shutdown().unwrap_err();
     match shutdown_err {
-        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
+        StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
         other => panic!("unexpected error: {other:?}"),
     }
 }
@@ -643,13 +643,13 @@ fn synchronous_persistence_failure_is_fatal() {
     let err = orchestrator
         .apply_operations(2, vec![operation(key_b, 20)])
         .unwrap_err();
-    assert!(matches!(err, MhinStoreError::Io(_)));
+    assert!(matches!(err, StoreError::Io(_)));
 
     let err = orchestrator
         .apply_operations(3, vec![operation(key_b, 21)])
         .unwrap_err();
     match err {
-        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
+        StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
         other => panic!("unexpected error: {other:?}"),
     }
 
@@ -661,7 +661,7 @@ fn synchronous_persistence_failure_is_fatal() {
 
     let err = orchestrator.fetch(key_a).unwrap_err();
     match err {
-        MhinStoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
+        StoreError::DurabilityFailure { block, .. } => assert_eq!(block, 2),
         other => panic!("unexpected error: {other:?}"),
     }
 }

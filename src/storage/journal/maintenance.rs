@@ -2,7 +2,7 @@ use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::storage::fs::sync_directory;
 use crate::types::{BlockId, JournalMeta};
 
@@ -115,7 +115,7 @@ pub(crate) fn scan_entries(chunk_dir: &Path, key_bytes: usize) -> StoreResult<Ve
     for (chunk_id, path) in enumerate_chunk_files(chunk_dir)? {
         match scan_chunk_file(&path, chunk_id, true, key_bytes) {
             Ok(outcome) => metas.extend(outcome.metas),
-            Err(err @ MhinStoreError::JournalChecksumMismatch { .. }) => return Err(err),
+            Err(err @ StoreError::JournalChecksumMismatch { .. }) => return Err(err),
             Err(err) if is_compatibility_error(&err) => return Err(err),
             Err(err) => {
                 tracing::warn!(
@@ -221,7 +221,7 @@ fn scan_chunk_file(
                 offset = file.stream_position()?;
                 last_good_end = offset;
             }
-            Err(err @ MhinStoreError::JournalChecksumMismatch { .. }) => {
+            Err(err @ StoreError::JournalChecksumMismatch { .. }) => {
                 tracing::error!(
                     chunk_id,
                     offset,
@@ -241,7 +241,7 @@ fn scan_chunk_file(
                 );
                 return Err(err);
             }
-            Err(MhinStoreError::Io(inner)) if inner.kind() == ErrorKind::UnexpectedEof => {
+            Err(StoreError::Io(inner)) if inner.kind() == ErrorKind::UnexpectedEof => {
                 tracing::warn!(
                     chunk_id,
                     offset,
@@ -282,15 +282,15 @@ fn scan_chunk_file(
     })
 }
 
-fn is_compatibility_error(err: &MhinStoreError) -> bool {
-    matches!(err, MhinStoreError::ConfigurationMismatch { .. })
+fn is_compatibility_error(err: &StoreError) -> bool {
+    matches!(err, StoreError::ConfigurationMismatch { .. })
         || matches!(
             err,
-            MhinStoreError::InvalidJournalHeader {
+            StoreError::InvalidJournalHeader {
                 reason: "unsupported version"
-            } | MhinStoreError::InvalidJournalHeader {
+            } | StoreError::InvalidJournalHeader {
                 reason: "invalid magic"
-            } | MhinStoreError::InvalidJournalHeader {
+            } | StoreError::InvalidJournalHeader {
                 reason: "key width below minimum"
             }
         )
@@ -375,7 +375,7 @@ mod tests {
 
         let err = scan_entries(tmp.path(), StoreKey::BYTES).expect_err("should fail fast");
         match err {
-            MhinStoreError::ConfigurationMismatch {
+            StoreError::ConfigurationMismatch {
                 field,
                 stored,
                 requested,

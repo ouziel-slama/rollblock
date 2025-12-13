@@ -59,7 +59,7 @@ For custom sizes, set `ROLLBLOCK_KEY_BYTES=64 cargo build` (any value from 8 to 
 ### Server: Read & Write Operations
 
 ```rust
-use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+use rollblock::{SimpleStoreFacade, StoreConfig, StoreFacade};
 use rollblock::types::{Operation, StoreKey as Key, Value};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1,                 // Thread count (1 = sequential)
         false,             // Journal compression
     )?;
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     // Write a block with multiple operations
     let key_alice: Key = [0x01, 0, 0, 0, 0, 0, 0, 0].into();

@@ -7,7 +7,7 @@ use heed::byteorder::BigEndian;
 use heed::types::{Bytes, SerdeBincode, Str, U64};
 use heed::{Database, Env};
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::orchestrator::DurabilityMode;
 #[cfg(test)]
 use crate::storage::journal::JournalPruneReport;
@@ -318,7 +318,7 @@ impl MetadataStore for LmdbMetadataStore {
         let end = *range.end();
 
         if start > end {
-            return Err(MhinStoreError::InvalidBlockRange { start, end });
+            return Err(StoreError::InvalidBlockRange { start, end });
         }
 
         let txn = self.env.read_txn()?;
@@ -352,12 +352,10 @@ impl MetadataStore for LmdbMetadataStore {
         }
 
         let mut txn = self.env.write_txn()?;
-        let range_start = block
-            .checked_add(1)
-            .ok_or(MhinStoreError::InvalidBlockRange {
-                start: block,
-                end: block,
-            })?;
+        let range_start = block.checked_add(1).ok_or(StoreError::InvalidBlockRange {
+            start: block,
+            end: block,
+        })?;
 
         let iter = self
             .journal_offsets_db
@@ -458,7 +456,7 @@ mod tests {
 
     use tempfile::tempdir_in;
 
-    use crate::error::MhinStoreError;
+    use crate::error::StoreError;
     use crate::storage::journal::ChunkDeletionPlan;
 
     fn sample_meta(block_height: BlockId, chunk_offset: u64) -> JournalMeta {
@@ -614,7 +612,7 @@ mod tests {
             .get_journal_offsets(std::ops::RangeInclusive::new(5, 3))
             .unwrap_err();
         match err {
-            MhinStoreError::InvalidBlockRange { start, end } => {
+            StoreError::InvalidBlockRange { start, end } => {
                 assert_eq!(start, 5);
                 assert_eq!(end, 3);
             }

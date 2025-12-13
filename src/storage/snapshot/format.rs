@@ -2,7 +2,7 @@ use std::path::Path;
 
 use blake3::{Hash, Hasher};
 
-use crate::error::{MhinStoreError, StoreResult};
+use crate::error::{StoreError, StoreResult};
 use crate::types::{BlockId, MIN_KEY_BYTES};
 
 pub(super) const SNAPSHOT_MAGIC: [u8; 4] = *b"MHIS";
@@ -36,14 +36,14 @@ pub(super) fn encode_header(
 
 pub(super) fn parse_header(path: &Path, bytes: &[u8]) -> StoreResult<SnapshotHeader> {
     if bytes.len() < SNAPSHOT_HEADER_SIZE {
-        return Err(MhinStoreError::SnapshotCorrupted {
+        return Err(StoreError::SnapshotCorrupted {
             path: path.to_path_buf(),
             reason: "file too small for snapshot header".to_string(),
         });
     }
 
     if bytes[0..4] != SNAPSHOT_MAGIC {
-        return Err(MhinStoreError::SnapshotCorrupted {
+        return Err(StoreError::SnapshotCorrupted {
             path: path.to_path_buf(),
             reason: format!("invalid magic bytes: {:?}", &bytes[0..4]),
         });
@@ -51,7 +51,7 @@ pub(super) fn parse_header(path: &Path, bytes: &[u8]) -> StoreResult<SnapshotHea
 
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
     if version != SNAPSHOT_VERSION {
-        return Err(MhinStoreError::SnapshotCorrupted {
+        return Err(StoreError::SnapshotCorrupted {
             path: path.to_path_buf(),
             reason: format!("unsupported version: {}", version),
         });
@@ -59,7 +59,7 @@ pub(super) fn parse_header(path: &Path, bytes: &[u8]) -> StoreResult<SnapshotHea
 
     let key_bytes = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
     if key_bytes < MIN_KEY_BYTES {
-        return Err(MhinStoreError::SnapshotCorrupted {
+        return Err(StoreError::SnapshotCorrupted {
             path: path.to_path_buf(),
             reason: format!("key width below minimum: {}", key_bytes),
         });

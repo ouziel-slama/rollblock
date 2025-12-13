@@ -7,12 +7,12 @@ cargo add rollblock
 ```
 
 ```rust
-use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+use rollblock::{SimpleStoreFacade, StoreConfig, StoreFacade};
 use rollblock::types::{Operation, StoreKey as Key};
 
 fn main() -> rollblock::StoreResult<()> {
     let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     let key: Key = [1, 2, 3, 4, 5, 6, 7, 8].into();
     store.set(1, vec![Operation { key, value: 42u64.into() }])?;
@@ -34,17 +34,17 @@ fn main() -> rollblock::StoreResult<()> {
 
 ---
 
-## 1. MhinStoreFacade — Basic Key-Value Store
+## 1. SimpleStoreFacade — Basic Key-Value Store
 
 The simplest facade for batch operations at block granularity.
 
 ```rust
-use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+use rollblock::{SimpleStoreFacade, StoreConfig, StoreFacade};
 use rollblock::types::{Operation, StoreKey as Key, Value};
 
 fn main() -> rollblock::StoreResult<()> {
     let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     let key_a: Key = [0xAA; Key::BYTES].into();
     let key_b: Key = [0xBB; Key::BYTES].into();
@@ -86,17 +86,17 @@ fn main() -> rollblock::StoreResult<()> {
 
 ---
 
-## 2. MhinStoreBlockFacade — Staged Block Transactions
+## 2. BlockStoreFacade — Staged Block Transactions
 
 Buffer operations before committing. Intermediate reads reflect pending changes.
 
 ```rust
-use rollblock::{MhinStoreBlockFacade, StoreConfig};
+use rollblock::{BlockStoreFacade, StoreConfig};
 use rollblock::types::{Operation, StoreKey as Key};
 
 fn main() -> rollblock::StoreResult<()> {
     let config = StoreConfig::new("./data", 4, 1000, 1, false)?;
-    let store = MhinStoreBlockFacade::new(config)?;
+    let store = BlockStoreFacade::new(config)?;
 
     let key: Key = [0x01; Key::BYTES].into();
 
@@ -138,7 +138,7 @@ Connect to a running store over the network. Requires the embedded server.
 ```rust
 use std::time::Duration;
 
-use rollblock::{MhinStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade};
+use rollblock::{SimpleStoreFacade, RemoteServerSettings, StoreConfig, StoreFacade};
 use rollblock::client::{ClientConfig, RemoteStoreClient};
 use rollblock::net::BasicAuthConfig;
 use rollblock::types::{Operation, StoreKey as Key};
@@ -153,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = StoreConfig::new("./data", 4, 1000, 1, false)?
         .with_remote_server(server_settings);
 
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
     store.set(
         1,
         vec![Operation {
@@ -195,12 +195,12 @@ let client_cfg = ClientConfig::without_tls(BasicAuthConfig::new("user", "pass"))
 ## 4. Reopening an Existing Store
 
 ```rust
-use rollblock::{MhinStoreFacade, StoreConfig};
+use rollblock::{SimpleStoreFacade, StoreConfig};
 
 fn main() -> rollblock::StoreResult<()> {
     // Loads shards, capacity, durability from persisted metadata
     let config = StoreConfig::existing("./data");
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     println!("Resumed at block {}", store.current_block()?);
     Ok(())

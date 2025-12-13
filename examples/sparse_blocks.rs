@@ -6,7 +6,7 @@
 //! Run with: cargo run --example sparse_blocks
 
 use rollblock::types::{Operation, StoreKey as Key};
-use rollblock::{MhinStoreFacade, StoreConfig, StoreFacade};
+use rollblock::{SimpleStoreFacade, StoreConfig, StoreFacade};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎯 Sparse Blocks Example\n");
@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?
     .without_remote_server();
 
-    let store = MhinStoreFacade::new(config)?;
+    let store = SimpleStoreFacade::new(config)?;
 
     println!("📖 Scenario: Blocks with large gaps in numbering\n");
 
